@@ -29,8 +29,8 @@
 #define MAP_SIZE 100
 #define MAP_RESOLUTION 0.1
 #define MAP_SCALING_FACTOR 7.4
-#define MAP_ORIGIN_X -5
-#define MAP_ORIGIN_Y -5
+#define MAP_ORIGIN_X (-5)
+#define MAP_ORIGIN_Y (-5)
 
 #define P_SENSE 0.7
 #define MAX_SENSE 100
@@ -70,8 +70,8 @@ void pose_callback(const gazebo_msgs::ModelStates& msg) {
 }
 
 void update_map() {
-  int x_map_idx = IPS_TO_MAP(ips_x);
-  int y_map_idx = IPS_TO_MAP(ips_y);
+  int x_map_idx = ips_x - MAP_ORIGIN_X;
+  int y_map_idx = ips_y - MAP_ORIGIN_Y;
   std::vector<int> line_x;
   std::vector<int> line_y;
   for (int i = 0; i < IMAGE_WIDTH; i++) {
@@ -85,7 +85,14 @@ void update_map() {
 
     bresenham(x_map_idx, y_map_idx, endpoint_x, endpoint_y, line_x, line_y);
     while(!line_x.empty()) {
-      logit_occupancy_grid[line_x.back()*MAP_SIZE + line_y.back()] += logit(1 - P_SENSE);
+      int next_x = line_x.back();
+      int next_y = line_y.back();
+      if (next_x >= MAP_SIZE || next_x < 0 ||
+          next_y >= MAP_SIZE || next_y < 0) {
+        continue;
+      }
+
+      logit_occupancy_grid[next_x*MAP_SIZE + next_y] += logit(1 - P_SENSE);
       line_x.pop_back();
       line_y.pop_back();
     }
@@ -104,17 +111,6 @@ float logit(float p) {
     return log(p/(1-p));
 }
 
-void update_occupancy_grid() {
-  for (i = 0; i < MAP_SIZE; i++) {
-    for (j = 0; j < MAP_SIZE; j++) {
-      if (fabs(logit_occupancy_grid[i][j]) < EPS) {
-        occupancy_grid[i*MAP_SIZE + j] = 50;
-      } else {
-        occupancy_grid[i*MAP_SIZE + j] = round(i_logit(logit_occupancy_grid[i*MAP_SIZE + j]) * 100);
-      }
-    }
-  }
-}
 //Callback function for the Position topic (LIVE)
 /*
 void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
@@ -184,6 +180,17 @@ void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<
   }
 }
 
+void update_occupancy_grid(std::vector<signed char, std::allocator<signed char> > data) {
+  for (int i = 0; i < MAP_SIZE; i++) {
+    for (int j = 0; j < MAP_SIZE; j++) {
+      if (fabs(logit_occupancy_grid[i*MAP_SIZE + j]) < EPS) {
+        data[i*MAP_SIZE + j] = 50;
+      } else {
+        data[i*MAP_SIZE + j] = round(i_logit(logit_occupancy_grid[i*MAP_SIZE + j]) * 100);
+      }
+    }
+  }
+}
 
 int main(int argc, char **argv)
 {
@@ -201,6 +208,7 @@ int main(int argc, char **argv)
   pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
   marker_pub = n.advertise<visualization_msgs::Marker>("visualization_marker", 1, true);
   
+
   //Velocity control variable
   geometry_msgs::Twist vel;
 
@@ -211,11 +219,10 @@ int main(int argc, char **argv)
   mmdata.height = MAP_SIZE;
   mmdata.origin.position.x = MAP_ORIGIN_X;
   mmdata.origin.position.y = MAP_ORIGIN_Y;
-  mmdata.origin.orientation = createQuaternionMsgFromYaw(YAW_OFFSET);
+  mmdata.origin.orientation = tf::createQuaternionMsgFromYaw(YAW_OFFSET);
 
   nav_msgs::OccupancyGrid occ_grid_msg;
   occ_grid_msg.info = mmdata;
-  occ_grid_msg.data = occupancy_grid;
 
   //Set the loop rate
   ros::Rate loop_rate(20);    //20Hz update rate
@@ -230,8 +237,10 @@ int main(int argc, char **argv)
   	vel.linear.x = 0; // set linear speed
   	vel.angular.z = 0; // set angular speed
 
-    occ_grid
   	velocity_publisher.publish(vel); // Publish the command velocity
+
+    update_occupancy_grid(occ_grid_msg.data);
+
   }
 
   return 0;
