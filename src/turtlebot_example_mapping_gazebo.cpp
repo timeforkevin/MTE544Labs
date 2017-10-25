@@ -48,7 +48,6 @@ float depth_section[IMAGE_WIDTH];
 int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];
 float logit_occupancy_grid[MAP_WIDTH*MAP_WIDTH];
 
-bool pose_updated = false;
 double ips_x;
 double ips_y;
 double ips_yaw;
@@ -62,15 +61,15 @@ void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
 //Callback function for the Position topic (SIMULATION)
-// void pose_callback(const gazebo_msgs::ModelStates& msg) {
+void pose_callback(const gazebo_msgs::ModelStates& msg) {
 
-//   int i;
-//   for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-//   ips_x = msg.pose[i].position.x ;
-//   ips_y = msg.pose[i].position.y ;
-//   // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
-//   ips_yaw = tf::getYaw(msg.pose[i].orientation);
-// }
+  int i;
+  for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
+  ips_x = msg.pose[i].position.x ;
+  ips_y = msg.pose[i].position.y ;
+  // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
+  ips_yaw = tf::getYaw(msg.pose[i].orientation);
+}
 
 void update_map() {
   int x_map_idx = round((ips_x - MAP_ORIGIN_X)/MAP_RESOLUTION);
@@ -125,15 +124,14 @@ float logit(float p) {
 
 //Callback function for the Position topic (LIVE)
 
-void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
-{
+// void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
+// {
 
-	ips_x = msg.pose.pose.position.x; // Robot X psotition
-	ips_y = msg.pose.pose.position.y; // Robot Y psotition
-	ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
-	ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", ips_x, ips_y, ips_yaw);
-  pose_updated = true;
-}
+// 	ips_x = msg.pose.pose.position.x; // Robot X psotition
+// 	ips_y = msg.pose.pose.position.y; // Robot Y psotition
+// 	ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
+// 	ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", ips_x, ips_y, ips_yaw);
+// }
 
 //Callback function for the map
 void map_callback(const nav_msgs::OccupancyGrid& msg)
@@ -149,10 +147,8 @@ void image_callback(const sensor_msgs::ImageConstPtr& img)
   int mid_idx = img->height * img->step/2;
   std::memcpy(depth_section, img->data.data()+mid_idx, img->step);
   ROS_INFO("depth:%f", depth_section[IMAGE_WIDTH/2]);
-  if (pose_updated) {
-    update_map();
-    pose_updated = false;
-  }
+
+  update_map();
 }
 
 //Bresenham line algorithm (pass empty vectors)
@@ -214,7 +210,7 @@ int main(int argc, char **argv)
   ros::NodeHandle n;
 
   //Subscribe to the desired topics and assign callbacks
-  ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
+  ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
   ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
   ros::Subscriber kinect_sub = n.subscribe("/camera/depth/image_raw", 1, image_callback);
 
