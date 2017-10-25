@@ -21,19 +21,20 @@
 
 #define EPS 0.02
 
-#define FOV 57
+#define FOV (60.0/180*M_PI)
 #define YAW_OFFSET 0
 #define IMAGE_WIDTH 640
-#define DEPTH_CHANNEL 2
 
-#define MAP_SIZE 100
+#define MAP_WIDTH 100
 #define MAP_RESOLUTION 0.1
-#define MAP_SCALING_FACTOR 7.4
 #define MAP_ORIGIN_X (-5)
 #define MAP_ORIGIN_Y (-5)
 
-#define P_SENSE 0.7
-#define MAX_SENSE 100
+#define P_SENSE 0.8
+#define P_UNSENSE 0.4
+#define MAX_SENSE 170
+
+#define POINT_IN_MAP(X,Y) (X > -1 && X < MAP_WIDTH && Y > -1 && Y < MAP_WIDTH)
 
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
@@ -41,10 +42,10 @@ ros::Publisher marker_pub;
 typedef unsigned char uint8;
 typedef char int8;
 
-uint8 depth_section[IMAGE_WIDTH];
+float depth_section[IMAGE_WIDTH];
 
-int8 occupancy_grid[MAP_SIZE*MAP_SIZE];
-float logit_occupancy_grid[MAP_SIZE*MAP_SIZE];
+int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];
+float logit_occupancy_grid[MAP_WIDTH*MAP_WIDTH];
 
 double ips_x;
 double ips_y;
@@ -63,42 +64,51 @@ void pose_callback(const gazebo_msgs::ModelStates& msg) {
 
   int i;
   for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-
   ips_x = msg.pose[i].position.x ;
   ips_y = msg.pose[i].position.y ;
+  // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
   ips_yaw = tf::getYaw(msg.pose[i].orientation);
 }
 
 void update_map() {
-  int x_map_idx = ips_x - MAP_ORIGIN_X;
-  int y_map_idx = ips_y - MAP_ORIGIN_Y;
+  int x_map_idx = round((ips_x - MAP_ORIGIN_X)/MAP_RESOLUTION);
+  int y_map_idx = round((ips_y - MAP_ORIGIN_Y)/MAP_RESOLUTION);
   std::vector<int> line_x;
   std::vector<int> line_y;
+  int prev_endpoint_x = 0;
+  int prev_endpoint_y = 0;
   for (int i = 0; i < IMAGE_WIDTH; i++) {
     line_x.clear();
     line_y.clear();
-
     double theta = ips_yaw + (IMAGE_WIDTH/2 - i) * FOV / IMAGE_WIDTH + YAW_OFFSET;
 
-    int endpoint_x = x_map_idx + depth_section[i] * cos(theta);
-    int endpoint_y = y_map_idx + depth_section[i] * sin(theta);
+    // ROS_INFO("THETA: %f", theta);
+    depth_section[i] = isnan(depth_section[i]) ? 100 : depth_section[i];
+    int endpoint_x = x_map_idx + depth_section[i] / MAP_RESOLUTION * cos(theta);
+    int endpoint_y = y_map_idx + depth_section[i] / MAP_RESOLUTION * sin(theta);
 
+    // Do not draw the same line twice
+    if (endpoint_x == prev_endpoint_x &&
+        endpoint_y == prev_endpoint_y) {
+      continue;
+    }
     bresenham(x_map_idx, y_map_idx, endpoint_x, endpoint_y, line_x, line_y);
     while(!line_x.empty()) {
       int next_x = line_x.back();
       int next_y = line_y.back();
-      if (next_x >= MAP_SIZE || next_x < 0 ||
-          next_y >= MAP_SIZE || next_y < 0) {
-        continue;
-      }
-
-      logit_occupancy_grid[next_x*MAP_SIZE + next_y] += logit(1 - P_SENSE);
       line_x.pop_back();
       line_y.pop_back();
+      // Do not update points off map
+      if (POINT_IN_MAP(next_x, next_y)) {
+        logit_occupancy_grid[next_x*MAP_WIDTH + next_y] += logit(P_UNSENSE);
+      }
+
     }
-    if (depth_section[i] < MAX_SENSE) {
-      logit_occupancy_grid[endpoint_x*MAP_SIZE + endpoint_y] += logit(P_SENSE);
+    if (depth_section[i] < MAX_SENSE && POINT_IN_MAP(endpoint_x, endpoint_y)) {
+      logit_occupancy_grid[endpoint_x*MAP_WIDTH + endpoint_y] += logit(P_SENSE);
     }
+    prev_endpoint_x = endpoint_x;
+    prev_endpoint_y = endpoint_y;
   }
 }
 
@@ -134,9 +144,8 @@ void image_callback(const sensor_msgs::ImageConstPtr& img)
 {
   int channels = img->step/img->width;
   int mid_idx = img->height * img->step/2;
-  for (int i = 0; i < IMAGE_WIDTH; i++) {
-    depth_section[i] = img->data[mid_idx + i * channels + DEPTH_CHANNEL];
-  }
+  std::memcpy(depth_section, img->data.data()+mid_idx, img->step);
+  ROS_INFO("depth:%f", depth_section[IMAGE_WIDTH/2]);
   update_map();
 }
 
@@ -180,13 +189,13 @@ void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<
   }
 }
 
-void update_occupancy_grid(std::vector<signed char, std::allocator<signed char> > data) {
-  for (int i = 0; i < MAP_SIZE; i++) {
-    for (int j = 0; j < MAP_SIZE; j++) {
-      if (fabs(logit_occupancy_grid[i*MAP_SIZE + j]) < EPS) {
-        data[i*MAP_SIZE + j] = 50;
+void update_occupancy_grid() {
+  for (int i = 0; i < MAP_WIDTH; i++) {
+    for (int j = 0; j < MAP_WIDTH; j++) {
+      if (fabs(logit_occupancy_grid[i*MAP_WIDTH + j]) < EPS) {
+        occupancy_grid[i*MAP_WIDTH + j] = 50;
       } else {
-        data[i*MAP_SIZE + j] = round(i_logit(logit_occupancy_grid[i*MAP_SIZE + j]) * 100);
+        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(logit_occupancy_grid[i*MAP_WIDTH + j]) * 100);
       }
     }
   }
@@ -207,22 +216,19 @@ int main(int argc, char **argv)
   ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
   pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
   marker_pub = n.advertise<visualization_msgs::Marker>("visualization_marker", 1, true);
-  
+  ros::Publisher grid_publisher = n.advertise<nav_msgs::OccupancyGrid>("/map", 2);
 
   //Velocity control variable
   geometry_msgs::Twist vel;
 
-  nav_msgs::MapMetaData mmdata;
-  mmdata.map_load_time = ros::Time::now();
-  mmdata.resolution = MAP_RESOLUTION;
-  mmdata.width = MAP_SIZE;
-  mmdata.height = MAP_SIZE;
-  mmdata.origin.position.x = MAP_ORIGIN_X;
-  mmdata.origin.position.y = MAP_ORIGIN_Y;
-  mmdata.origin.orientation = tf::createQuaternionMsgFromYaw(YAW_OFFSET);
 
   nav_msgs::OccupancyGrid occ_grid_msg;
-  occ_grid_msg.info = mmdata;
+  
+  occ_grid_msg.info.resolution = MAP_RESOLUTION;
+  occ_grid_msg.info.width = MAP_WIDTH;
+  occ_grid_msg.info.height = MAP_WIDTH;
+  occ_grid_msg.info.origin.position.x = MAP_ORIGIN_X;
+  occ_grid_msg.info.origin.position.y = MAP_ORIGIN_Y;
 
   //Set the loop rate
   ros::Rate loop_rate(20);    //20Hz update rate
@@ -238,9 +244,11 @@ int main(int argc, char **argv)
   	vel.angular.z = 0; // set angular speed
 
   	velocity_publisher.publish(vel); // Publish the command velocity
+    update_occupancy_grid();
+    occ_grid_msg.data = std::vector<signed char>(occupancy_grid, occupancy_grid+MAP_WIDTH*MAP_WIDTH);
 
-    update_occupancy_grid(occ_grid_msg.data);
-
+    ROS_INFO("UPDATED");
+    grid_publisher.publish(occ_grid_msg);
   }
 
   return 0;
