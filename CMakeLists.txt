@@ -109,7 +109,7 @@ include_directories(
 ## Declare a cpp executable
  add_executable(turtlebot_example_node src/turtlebot_example_node.cpp)
  add_executable(turtlebot_example_mapping src/turtlebot_example_mapping.cpp)
- add_executable(turtlebot_example_mapping src/turtlebot_example_localization.cpp)
+ # add_executable(turtlebot_example_localization src/turtlebot_example_localization.cpp)
 
 ## Add cmake target dependencies of the executable/library
 ## as an example, message headers may need to be generated before nodes
@@ -124,9 +124,9 @@ include_directories(
    ${catkin_LIBRARIES}
  )
 
- target_link_libraries(turtlebot_example_localization
-   ${catkin_LIBRARIES}
- )
+ # target_link_libraries(turtlebot_example_localization
+ #   ${catkin_LIBRARIES}
+ # )
 #############
 ## Install ##
 #############

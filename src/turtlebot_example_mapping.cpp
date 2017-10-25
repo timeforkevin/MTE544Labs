@@ -19,6 +19,7 @@
 #include <visualization_msgs/Marker.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <sensor_msgs/Image.h>
+#include <sensor_msgs/LaserScan.h>
 
 #define EPS 0.02
 
@@ -31,7 +32,7 @@
 #define MAP_ORIGIN_X (-5)
 #define MAP_ORIGIN_Y (-5)
 
-#define P_SENSE 0.8
+#define P_SENSE 0.9
 #define P_UNSENSE 0.4
 #define MAX_SENSE 4.5
 
@@ -42,8 +43,6 @@ ros::Publisher marker_pub;
 
 typedef unsigned char uint8;
 typedef char int8;
-
-float depth_section[IMAGE_WIDTH];
 
 int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];
 float logit_occupancy_grid[MAP_WIDTH*MAP_WIDTH];
@@ -62,32 +61,52 @@ void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
 //Callback function for the Position topic (SIMULATION)
-// void pose_callback(const gazebo_msgs::ModelStates& msg) {
+void pose_callback(const gazebo_msgs::ModelStates& msg) {
 
-//   int i;
-//   for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-//   ips_x = msg.pose[i].position.x ;
-//   ips_y = msg.pose[i].position.y ;
-//   // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
-//   ips_yaw = tf::getYaw(msg.pose[i].orientation);
+  int i;
+  for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
+  ips_x = msg.pose[i].position.x ;
+  ips_y = msg.pose[i].position.y ;
+  // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
+  ips_yaw = tf::getYaw(msg.pose[i].orientation);
+  pose_updated = true;
+}
+
+//Callback function for the Position topic (LIVE)
+// void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
+// {
+
+//   ips_x = msg.pose.pose.position.x; // Robot X psotition
+//   ips_y = msg.pose.pose.position.y; // Robot Y psotition
+//   ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
+//   ROS_INFO("pose_callback X: %f Y: %f Yaw: %f", ips_x, ips_y, ips_yaw);
+//   pose_updated = true;
 // }
 
-void update_map() {
+
+void update_map(const sensor_msgs::LaserScan msg) {
   int x_map_idx = round((ips_x - MAP_ORIGIN_X)/MAP_RESOLUTION);
   int y_map_idx = round((ips_y - MAP_ORIGIN_Y)/MAP_RESOLUTION);
   std::vector<int> line_x;
   std::vector<int> line_y;
   int prev_endpoint_x = 0;
   int prev_endpoint_y = 0;
-  for (int i = 0; i < IMAGE_WIDTH; i++) {
+
+  float fov = msg.angle_max - msg.angle_min;
+  int num_points = abs(fov / msg.angle_increment);
+  ROS_INFO("RANGE: %f", msg.ranges[num_points/2]);
+  for (int i = 0; i < num_points; i += 2) {
     line_x.clear();
     line_y.clear();
-    double theta = ips_yaw + (IMAGE_WIDTH/2 - i) * FOV / IMAGE_WIDTH + YAW_OFFSET;
+    double theta = ips_yaw + msg.angle_min + i*msg.angle_increment + YAW_OFFSET;
 
-    // ROS_INFO("THETA: %f", theta);
-    depth_section[i] = isnan(depth_section[i]) ? MAX_SENSE : depth_section[i];
-    int endpoint_x = x_map_idx + depth_section[i] / MAP_RESOLUTION * cos(theta);
-    int endpoint_y = y_map_idx + depth_section[i] / MAP_RESOLUTION * sin(theta);
+    float range = msg.ranges[i];
+    if (isnan(range)) {
+      continue;
+    }
+    range = (range > msg.range_max) ? msg.range_max : range;
+    int endpoint_x = x_map_idx + range / MAP_RESOLUTION * cos(theta);
+    int endpoint_y = y_map_idx + range / MAP_RESOLUTION * sin(theta);
 
     // Do not draw the same line twice
     if (endpoint_x == prev_endpoint_x &&
@@ -106,7 +125,7 @@ void update_map() {
       }
 
     }
-    if (depth_section[i] < MAX_SENSE && POINT_IN_MAP(endpoint_x, endpoint_y)) {
+    if (range < MAX_SENSE && POINT_IN_MAP(endpoint_x, endpoint_y)) {
       logit_occupancy_grid[endpoint_x*MAP_WIDTH + endpoint_y] += logit(P_SENSE);
     }
     prev_endpoint_x = endpoint_x;
@@ -123,17 +142,6 @@ float logit(float p) {
     return log(p/(1-p));
 }
 
-//Callback function for the Position topic (LIVE)
-
-void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
-{
-
-	ips_x = msg.pose.pose.position.x; // Robot X psotition
-	ips_y = msg.pose.pose.position.y; // Robot Y psotition
-	ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
-	ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", ips_x, ips_y, ips_yaw);
-  pose_updated = true;
-}
 
 //Callback function for the map
 void map_callback(const nav_msgs::OccupancyGrid& msg)
@@ -143,14 +151,10 @@ void map_callback(const nav_msgs::OccupancyGrid& msg)
     //you probably want to save the map into a form which is easy to work with
 }
 
-void image_callback(const sensor_msgs::ImageConstPtr& img)
+void image_callback(const sensor_msgs::LaserScan msg)
 {
-  int channels = img->step/img->width;
-  int mid_idx = img->height * img->step/2;
-  std::memcpy(depth_section, img->data.data()+mid_idx, img->step);
-  ROS_INFO("depth:%f", depth_section[IMAGE_WIDTH/2]);
   if (pose_updated) {
-    update_map();
+    update_map(msg);
     pose_updated = false;
   }
 }
@@ -214,9 +218,10 @@ int main(int argc, char **argv)
   ros::NodeHandle n;
 
   //Subscribe to the desired topics and assign callbacks
-  ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
+  // ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
+  ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
   ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
-  ros::Subscriber kinect_sub = n.subscribe("/camera/depth/image_raw", 1, image_callback);
+  ros::Subscriber kinect_sub = n.subscribe("/scan", 1, image_callback);
 
   //Setup topics to Publish from this node
   ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
