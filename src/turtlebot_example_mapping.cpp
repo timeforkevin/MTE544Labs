@@ -32,7 +32,7 @@
 
 #define P_SENSE 0.8
 #define P_UNSENSE 0.4
-#define MAX_SENSE 170
+#define MAX_SENSE 4.5
 
 #define POINT_IN_MAP(X,Y) (X > -1 && X < MAP_WIDTH && Y > -1 && Y < MAP_WIDTH)
 
@@ -83,7 +83,7 @@ void update_map() {
     double theta = ips_yaw + (IMAGE_WIDTH/2 - i) * FOV / IMAGE_WIDTH + YAW_OFFSET;
 
     // ROS_INFO("THETA: %f", theta);
-    depth_section[i] = isnan(depth_section[i]) ? 100 : depth_section[i];
+    depth_section[i] = isnan(depth_section[i]) ? MAX_SENSE : depth_section[i];
     int endpoint_x = x_map_idx + depth_section[i] / MAP_RESOLUTION * cos(theta);
     int endpoint_y = y_map_idx + depth_section[i] / MAP_RESOLUTION * sin(theta);
 
