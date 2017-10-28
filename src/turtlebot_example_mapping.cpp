@@ -23,7 +23,6 @@
 
 #define EPS 0.02
 
-#define FOV (57.0/180*M_PI)
 #define YAW_OFFSET 0
 #define IMAGE_WIDTH 640
 

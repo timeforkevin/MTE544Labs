@@ -18,10 +18,10 @@
 #include <visualization_msgs/Marker.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <sensor_msgs/Image.h>
+#include <Eigen/Dense>
 
 #define EPS 0.02
 
-#define FOV (60.0/180*M_PI)
 #define YAW_OFFSET 0
 #define IMAGE_WIDTH 640
 
@@ -43,17 +43,16 @@ ros::Publisher marker_pub;
 
 typedef unsigned char uint8;
 typedef char int8;
+typedef Eigen::Matrix<double, 3, 1> Vector3d;
 
-typedef {
-  double x;
-  double y;
-  double yaw;
+typedef struct {
+  Vector3d x;
   double weight;
 } particle;
 
 particle particle_set[NUM_PARTICLES];
 
-geometry_msgs::twist odom_input;
+geometry_msgs::Twist odom_input;
 
 
 float depth_section[IMAGE_WIDTH];
@@ -120,66 +119,25 @@ void image_callback(const sensor_msgs::ImageConstPtr& img)
   ROS_INFO("depth:%f", depth_section[IMAGE_WIDTH/2]);
 }
 
-//Bresenham line algorithm (pass empty vectors)
-// Usage: (x0, y0) is the first point and (x1, y1) is the second point. The calculated
-//        points (x, y) are stored in the x and y vector. x and y should be empty 
-//	  vectors of integers and shold be defined where this function is called from.
-void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<int>& y) {
+void set_weights() {
+  for (int i = 0; i < NUM_PARTICLES; i++) {
 
-  int dx = abs(x1 - x0);
-  int dy = abs(y1 - y0);
-  int dx2 = x1 - x0;
-  int dy2 = y1 - y0;
-  
-  const bool s = abs(dy) > abs(dx);
-
-  if (s) {
-    int dx2 = dx;
-    dx = dy;
-    dy = dx2;
-  }
-
-  int inc1 = 2 * dy;
-  int d = inc1 - dx;
-  int inc2 = d - dx;
-
-  x.push_back(x0);
-  y.push_back(y0);
-
-  while (x0 != x1 || y0 != y1) {
-    if (s) y0+=sgn(dy2); else x0+=sgn(dx2);
-    if (d < 0) d += inc1;
-    else {
-      d += inc2;
-      if (s) x0+=sgn(dx2); else y0+=sgn(dy2);
-    }
-
-    //Add point to vector
-    x.push_back(x0);
-    y.push_back(y0);
-  }
-}
-
-void set_weight(particle *p) {
-  for (int i = 0; i < MAP_WIDTH; i++) {
-    for (int j = 0; j < MAP_WIDTH; j++) {
-      // If occupied
-      if (occupancy_grid[i*MAP_WIDTH + j] > 80) {
-        double theta
-        = atan2(j*MAP_RESOLUTION + MAP_ORIGIN_Y - p->y,
-                i*MAP_RESOLUTION + MAP_ORIGIN_X - p->x);
-      }
-    }
   }
 }
 
 /// Update with Motion Model
 void prediction_update(float dt) {
   for (int i = 0; i < NUM_PARTICLES; i++) {
-    particle_set[i].x += odom_input.linear.x*cos(yaw)*dt; // TODO Add random uncertainty
-    particle_set[i].y += odom_input.linear.x*sin(yaw)*dt; // TODO Add random uncertainty
-    particle_set[i].yaw += odom_input.angular.z*dt; // TODO Add random uncertainty
-    if (!POINT_IN_MAP(particle_set[i].x, particle_set[i].y)) {
+    Vector3d Bu;
+    Bu << odom_input.linear.x*cos(particle_set[i].x(2))*dt,
+         odom_input.linear.x*sin(particle_set[i].x(2))*dt,
+         odom_input.angular.z*dt;
+
+
+
+    particle_set[i].x += Bu;
+
+    if (!POINT_IN_MAP(particle_set[i].x[0], particle_set[i].x[1])) {
       // TODO Redistribute somewhere
     }
   }
@@ -188,9 +146,8 @@ void prediction_update(float dt) {
 
 void measurement_update() {
 
-  for (int i = 0; i < NUM_PARTICLES; i++) {
-    set_weight(&particle_set[i]);
-  }
+  set_weights();
+
 
   for (int i = 0; i < NUM_PARTICLES; i++) {
     // Resample 
