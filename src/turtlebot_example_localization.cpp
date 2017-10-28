@@ -19,8 +19,7 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <sensor_msgs/Image.h>
 #include <Eigen/Dense>
-
-#define EPS 0.02
+#include <random>
 
 #define YAW_OFFSET 0
 #define IMAGE_WIDTH 640
@@ -37,9 +36,7 @@
 #define NUM_PARTICLES 100
 
 #define POINT_IN_MAP(X,Y) (X > -1 && X < MAP_WIDTH && Y > -1 && Y < MAP_WIDTH)
-
-ros::Publisher pose_publisher;
-ros::Publisher marker_pub;
+#define FRAND_TO(X) (static_cast <double> (rand()) / (static_cast <double> (RAND_MAX/X)))
 
 typedef unsigned char uint8;
 typedef char int8;
@@ -50,21 +47,17 @@ typedef struct {
   double weight;
 } particle;
 
-particle particle_set[NUM_PARTICLES];
-
+ros::Publisher pose_publisher;
+ros::Publisher marker_pub;
 geometry_msgs::Twist odom_input;
 
+particle *particle_set;
 
-float depth_section[IMAGE_WIDTH];
-
-int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];
-float logit_occupancy_grid[MAP_WIDTH*MAP_WIDTH];
-
-double ips_x;
-double ips_y;
-double ips_yaw;
+std::random_device rd;
+std::mt19937 e2(rd());
 
 
+// Function Prototypes
 void update_map();
 float logit(float p);
 float i_logit(float l);
@@ -77,19 +70,10 @@ void pose_callback(const gazebo_msgs::ModelStates& msg) {
 
   int i;
   for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-  ips_x = msg.pose[i].position.x ;
-  ips_y = msg.pose[i].position.y ;
+  double ips_x = msg.pose[i].position.x ;
+  double ips_y = msg.pose[i].position.y ;
+  double ips_yaw = tf::getYaw(msg.pose[i].orientation);
   // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
-  ips_yaw = tf::getYaw(msg.pose[i].orientation);
-}
-
-float i_logit(float l) {
-    float exp_l = exp(l);
-    return exp_l/(1+exp_l);
-}
-
-float logit(float p) {
-    return log(p/(1-p));
 }
 
 //Callback function for the Position topic (LIVE)
@@ -103,14 +87,6 @@ void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
 	ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", X, Y, Yaw);
 }*/
 
-//Callback function for the map
-void map_callback(const nav_msgs::OccupancyGrid& msg)
-{
-    //This function is called when a new map is received
-    
-    //you probably want to save the map into a form which is easy to work with
-}
-
 void image_callback(const sensor_msgs::ImageConstPtr& img)
 {
   int channels = img->step/img->width;
@@ -119,39 +95,88 @@ void image_callback(const sensor_msgs::ImageConstPtr& img)
   ROS_INFO("depth:%f", depth_section[IMAGE_WIDTH/2]);
 }
 
-void set_weights() {
-  for (int i = 0; i < NUM_PARTICLES; i++) {
-
+int map_to_cdf(double sample, double *cdf, int cdf_size) {
+  // Binary Search
+  int i_begin = 0;
+  int i_end = cdf_size - 1;
+  while (i_begin != i_end) {
+    int i_test = (i_begin + i_end)/2;
+    if (sample < cdf[i_test]) {
+      i_end = i_test;
+    } else {
+      i_begin = i_test + 1;
+    }
   }
+  return i_begin;
 }
 
 /// Update with Motion Model
 void prediction_update(float dt) {
+  static std::normal_distribution<double> distx(0.0, 0.03);
+  static std::normal_distribution<double> disty(0.0, 0.03);
+  static std::normal_distribution<double> distyaw(0.0, 0.03);
+
   for (int i = 0; i < NUM_PARTICLES; i++) {
+    particle *p = &particle_set[i];
+
     Vector3d Bu;
-    Bu << odom_input.linear.x*cos(particle_set[i].x(2))*dt,
-         odom_input.linear.x*sin(particle_set[i].x(2))*dt,
-         odom_input.angular.z*dt;
+    Bu << odom_input.linear.x*cos(p->x(2)),
+         odom_input.linear.x*sin(p->x(2)),
+         odom_input.angular.z;
 
+    // Add disturbance
+    Vector3d eps;
+    eps << distx(e2), disty(e2), distyaw(e2);
 
+    p->x += Bu*dt + eps;
 
-    particle_set[i].x += Bu;
-
-    if (!POINT_IN_MAP(particle_set[i].x[0], particle_set[i].x[1])) {
-      // TODO Redistribute somewhere
+    // Maintain yaw between +-pi
+    if (p->x(2) > M_PI) {
+      p->x(2) -= 2*M_PI;
+    } else if (p->x(2) < -M_PI) {
+      p->x(2) += 2*M_PI;
     }
   }
 }
 
+void measurement_update(double ips_x, double ips_y, double ips_yaw) {
+  static double varx = 0.01;
+  static double vary = 0.01;
+  static double varyaw = 0.01;
 
-void measurement_update() {
-
-  set_weights();
-
-
+  // Set Weights
   for (int i = 0; i < NUM_PARTICLES; i++) {
-    // Resample 
+    particle *p = &particle_set[i];
+    double diffx = p->x(0) - ips_x;
+    double diffy = p->x(1) - ips_y;
+    double diffyaw = p->x(2) - ips_yaw;
+    if (diffyaw > M_PI) {
+      diffyaw -= 2*M_PI;
+    } else if (diffyaw < -M_PI) {
+      diffyaw += 2*M_PI;
+    }
+
+    p->weight = exp(-(diffx*diffx/varx +
+                      diffy*diffy/vary +
+                      diffyaw*diffyaw/varyaw)/2);
   }
+
+  // Calculate CDF of particles
+  double cdf[NUM_PARTICLES];
+  double running_sum = 0;
+  for (int i = 0; i < NUM_PARTICLES; i++) {
+    particle *p = &particle_set[i];
+    cdf[i] = running_sum += p->weight;
+  }
+
+  // Resample
+  particle *new_particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
+  for (int i = 0; i < NUM_PARTICLES; i++) {
+    particle *sampled = particle_set[map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES)];
+    memcpy(&new_particle_set[i], sampled);
+  }
+  free(particle_set);
+  particle_set = new_particle_set;
 }
 
 int main(int argc, char **argv)
@@ -176,8 +201,12 @@ int main(int argc, char **argv)
   //Set the loop rate
   ros::Rate loop_rate(20);    //20Hz update rate
 
+  particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
   for (int i = 0; i < NUM_PARTICLES; i++) {
-    // TODO: initial distribution of particles
+    particle *p = &particle_set[i];
+    p->x << FRAND_TO(10) + MAP_ORIGIN_X,
+            FRAND_TO(10) + MAP_ORIGIN_Y,
+            FRAND_TO(2*M_PI) - M_PI;
   }
 
   while (ros::ok())
@@ -194,5 +223,6 @@ int main(int argc, char **argv)
     ROS_INFO("UPDATED");
   }
 
+  free(particle_set);
   return 0;
 }
