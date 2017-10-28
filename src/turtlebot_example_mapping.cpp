@@ -100,7 +100,7 @@ void update_map(const sensor_msgs::LaserScan msg) {
     double theta = ips_yaw + msg.angle_min + i*msg.angle_increment + YAW_OFFSET;
 
     float range = msg.ranges[i];
-    if (isnan(range)) {
+    if (std::isnan(range)) {
       continue;
     }
     range = (range > msg.range_max) ? msg.range_max : range;

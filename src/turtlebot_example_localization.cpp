@@ -89,10 +89,14 @@ void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
 
 void image_callback(const sensor_msgs::ImageConstPtr& img)
 {
-  int channels = img->step/img->width;
-  int mid_idx = img->height * img->step/2;
-  std::memcpy(depth_section, img->data.data()+mid_idx, img->step);
-  ROS_INFO("depth:%f", depth_section[IMAGE_WIDTH/2]);
+}
+
+//Callback function for the map
+void map_callback(const nav_msgs::OccupancyGrid& msg)
+{
+    //This function is called when a new map is received
+    
+    //you probably want to save the map into a form which is easy to work with
 }
 
 int map_to_cdf(double sample, double *cdf, int cdf_size) {
@@ -172,8 +176,8 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   // Resample
   particle *new_particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
   for (int i = 0; i < NUM_PARTICLES; i++) {
-    particle *sampled = particle_set[map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES)];
-    memcpy(&new_particle_set[i], sampled);
+    particle *sampled = &particle_set[map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES)];
+    memcpy(&new_particle_set[i], sampled, sizeof(particle));
   }
   free(particle_set);
   particle_set = new_particle_set;
