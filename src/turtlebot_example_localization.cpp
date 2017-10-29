@@ -17,6 +17,7 @@
 #include <gazebo_msgs/ModelStates.h>
 #include <visualization_msgs/Marker.h>
 #include <nav_msgs/OccupancyGrid.h>
+#include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Image.h>
 #include <Eigen/Dense>
 #include <random>
@@ -41,6 +42,7 @@
 typedef unsigned char uint8;
 typedef char int8;
 typedef Eigen::Matrix<double, 3, 1> Vector3d;
+typedef Eigen::Matrix<double, 3, 3> Matrix3d;
 
 typedef struct {
   Vector3d x;
@@ -49,8 +51,10 @@ typedef struct {
 
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
-geometry_msgs::Twist odom_input;
 
+geometry_msgs::Twist odom_input;
+Matrix3d odom_cov;
+ros::Time last_pred;
 particle *particle_set;
 
 std::random_device rd;
@@ -62,6 +66,8 @@ void update_map();
 float logit(float p);
 float i_logit(float l);
 void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<int>& y);
+void prediction_update(ros::Duration dt);
+void measurement_update(double ips_x, double ips_y, double ips_yaw);
 
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
@@ -73,6 +79,7 @@ void pose_callback(const gazebo_msgs::ModelStates& msg) {
   double ips_x = msg.pose[i].position.x ;
   double ips_y = msg.pose[i].position.y ;
   double ips_yaw = tf::getYaw(msg.pose[i].orientation);
+  measurement_update(ips_x, ips_y, ips_yaw);
   // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
 }
 
@@ -81,11 +88,27 @@ void pose_callback(const gazebo_msgs::ModelStates& msg) {
 void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
 {
 
-	ips_x X = msg.pose.pose.position.x; // Robot X psotition
-	ips_y Y = msg.pose.pose.position.y; // Robot Y psotition
-	ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
+	double ips_x X = msg.pose.pose.position.x; // Robot X psotition
+	double ips_y Y = msg.pose.pose.position.y; // Robot Y psotition
+	double ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
+  measurement_update(ips_x, ips_y, ips_yaw);
 	ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", X, Y, Yaw);
 }*/
+
+void odom_callback(nav_msgs::Odometry msg) {
+  if (last_pred.isZero()) {
+    last_pred = ros::Time::now();
+    return;
+  }
+  odom_input = msg.twist.twist;
+  odom_cov << msg.twist.covariance[0], msg.twist.covariance[1], msg.twist.covariance[5],
+              msg.twist.covariance[6], msg.twist.covariance[7], msg.twist.covariance[11],
+              msg.twist.covariance[30], msg.twist.covariance[31], msg.twist.covariance[35];
+
+  ros::Time now = ros::Time::now();
+  prediction_update(now - last_pred);
+  last_pred = now;
+}
 
 void image_callback(const sensor_msgs::ImageConstPtr& img)
 {
@@ -95,7 +118,6 @@ void image_callback(const sensor_msgs::ImageConstPtr& img)
 void map_callback(const nav_msgs::OccupancyGrid& msg)
 {
     //This function is called when a new map is received
-    
     //you probably want to save the map into a form which is easy to work with
 }
 
@@ -115,10 +137,12 @@ int map_to_cdf(double sample, double *cdf, int cdf_size) {
 }
 
 /// Update with Motion Model
-void prediction_update(float dt) {
-  static std::normal_distribution<double> distx(0.0, 0.03);
-  static std::normal_distribution<double> disty(0.0, 0.03);
-  static std::normal_distribution<double> distyaw(0.0, 0.03);
+void prediction_update(ros::Duration dt) {
+  static std::normal_distribution<double> dist(0.0, 1);
+
+  Eigen::EigenSolver<Matrix3d> es(odom_cov);
+  Vector3d lambda = es.eigenvalues().cwiseAbs();
+  Matrix3d E = es.eigenvectors().cwiseAbs();
 
   for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *p = &particle_set[i];
@@ -129,10 +153,9 @@ void prediction_update(float dt) {
          odom_input.angular.z;
 
     // Add disturbance
-    Vector3d eps;
-    eps << distx(e2), disty(e2), distyaw(e2);
+    Vector3d delta = E*lambda.cwiseSqrt()*dist(e2);
 
-    p->x += Bu*dt + eps;
+    p->x += Bu*dt.toSec() + delta;
 
     // Maintain yaw between +-pi
     if (p->x(2) > M_PI) {
@@ -144,9 +167,9 @@ void prediction_update(float dt) {
 }
 
 void measurement_update(double ips_x, double ips_y, double ips_yaw) {
-  static double varx = 0.01;
-  static double vary = 0.01;
-  static double varyaw = 0.01;
+  static double varx = 0.1;
+  static double vary = 0.1;
+  static double varyaw = 0.1;
 
   // Set Weights
   for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -185,26 +208,6 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
 
 int main(int argc, char **argv)
 {
-	//Initialize the ROS framework
-  ros::init(argc,argv,"main_control");
-  ros::NodeHandle n;
-
-  //Subscribe to the desired topics and assign callbacks
-  ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
-  ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
-  ros::Subscriber kinect_sub = n.subscribe("/camera/depth/image_raw", 1, image_callback);
-
-  //Setup topics to Publish from this node
-  ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
-  pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
-  marker_pub = n.advertise<visualization_msgs::Marker>("visualization_marker", 1, true);
-
-  //Velocity control variable
-  geometry_msgs::Twist vel;
-
-  //Set the loop rate
-  ros::Rate loop_rate(20);    //20Hz update rate
-
   particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
   for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *p = &particle_set[i];
@@ -212,6 +215,35 @@ int main(int argc, char **argv)
             FRAND_TO(10) + MAP_ORIGIN_Y,
             FRAND_TO(2*M_PI) - M_PI;
   }
+
+	//Initialize the ROS framework
+  ros::init(argc,argv,"main_control");
+  ros::NodeHandle n;
+
+  //Subscribe to the desired topics and assign callbacks
+  ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
+  ros::Subscriber odom_sub = n.subscribe("/odom", 1, odom_callback);
+  ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
+  ros::Subscriber kinect_sub = n.subscribe("/camera/depth/image_raw", 1, image_callback);
+
+  //Setup topics to Publish from this node
+  ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
+  pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
+  marker_pub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1, true);
+
+  visualization_msgs::Marker arrow;
+  arrow.type = visualization_msgs::Marker::ARROW;
+  arrow.action = 0;
+  arrow.color.g = 1;
+  arrow.color.a = 1;
+  arrow.lifetime = ros::Duration(1/20);
+  arrow.frame_locked = false;
+
+  //Velocity control variable
+  geometry_msgs::Twist vel;
+
+  //Set the loop rate
+  ros::Rate loop_rate(20);    //20Hz update rate
 
   while (ros::ok())
   {
@@ -224,6 +256,13 @@ int main(int argc, char **argv)
 
   	velocity_publisher.publish(vel); // Publish the command velocity
 
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+      arrow.pose.position.x = particle_set[i].x(0);
+      arrow.pose.position.y = particle_set[i].x(1);
+      tf::Quaternion q = tf::createQuaternionFromYaw(particle_set[i].x(2));
+      tf::quaternionTFToMsg(q, arrow.pose.orientation);
+      marker_pub.publish(arrow);
+    }
     ROS_INFO("UPDATED");
   }
 
