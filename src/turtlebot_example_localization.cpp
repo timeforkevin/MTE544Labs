@@ -38,6 +38,7 @@
 
 #define POINT_IN_MAP(X,Y) (X > -1 && X < MAP_WIDTH && Y > -1 && Y < MAP_WIDTH)
 #define FRAND_TO(X) (static_cast <double> (rand()) / (static_cast <double> (RAND_MAX/X)))
+#define MIN(X,Y) ((X) < (Y) ? (X) : (Y))
 
 typedef unsigned char uint8;
 typedef char int8;
@@ -52,9 +53,11 @@ typedef struct {
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
 
+visualization_msgs::Marker points;
 geometry_msgs::Twist odom_input;
 Matrix3d odom_cov;
 ros::Time last_pred;
+ros::Time last_ips;
 particle *particle_set;
 
 std::random_device rd;
@@ -73,14 +76,18 @@ short sgn(int x) { return x >= 0 ? 1 : -1; }
 
 //Callback function for the Position topic (SIMULATION)
 void pose_callback(const gazebo_msgs::ModelStates& msg) {
-
-  int i;
-  for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-  double ips_x = msg.pose[i].position.x ;
-  double ips_y = msg.pose[i].position.y ;
-  double ips_yaw = tf::getYaw(msg.pose[i].orientation);
-  measurement_update(ips_x, ips_y, ips_yaw);
-  // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
+  static std::normal_distribution<double> dist(0.0, 1);
+  ros::Time now = ros::Time::now();
+  if (now - last_ips > ros::Duration(1)) {
+    int i;
+    for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
+    double ips_x = msg.pose[i].position.x + dist(e2);
+    double ips_y = msg.pose[i].position.y + dist(e2);
+    double ips_yaw = tf::getYaw(msg.pose[i].orientation) + dist(e2);
+    measurement_update(ips_x, ips_y, ips_yaw);
+    // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
+    last_ips = now;
+  }
 }
 
 //Callback function for the Position topic (LIVE)
@@ -104,9 +111,23 @@ void odom_callback(nav_msgs::Odometry msg) {
   odom_cov << msg.twist.covariance[0], msg.twist.covariance[1], msg.twist.covariance[5],
               msg.twist.covariance[6], msg.twist.covariance[7], msg.twist.covariance[11],
               msg.twist.covariance[30], msg.twist.covariance[31], msg.twist.covariance[35];
+  // odom_cov(0, 0) = MIN(odom_cov(0, 0), 0.01);
+  // odom_cov(1, 1) = MIN(odom_cov(1, 1), 0.01);
+  // odom_cov(2, 2) = MIN(odom_cov(2, 2), 0.01);
+
 
   ros::Time now = ros::Time::now();
   prediction_update(now - last_pred);
+
+  points.header.stamp = ros::Time::now();
+  for (int i = 0; i < NUM_PARTICLES; i++) {
+    geometry_msgs::Point p;
+    p.x = particle_set[i].x(0);
+    p.y = particle_set[i].x(1);
+    points.points.push_back(p);
+  }
+  marker_pub.publish(points);
+
   last_pred = now;
 }
 
@@ -156,7 +177,8 @@ void prediction_update(ros::Duration dt) {
     Vector3d delta = E*lambda.cwiseSqrt()*dist(e2);
 
     p->x += Bu*dt.toSec() + delta;
-
+    ROS_INFO("delta: %f, %f, %f", delta(0), delta(1), delta(2));
+    ROS_INFO("E*lambda: %f, %f, %f", E*lambda(0), E*lambda(1), E*lambda(2));
     // Maintain yaw between +-pi
     if (p->x(2) > M_PI) {
       p->x(2) -= 2*M_PI;
@@ -216,6 +238,19 @@ int main(int argc, char **argv)
             FRAND_TO(2*M_PI) - M_PI;
   }
 
+  points.header.frame_id = "map";
+  points.id = 0;
+  points.ns = "particles";
+  points.type = visualization_msgs::Marker::POINTS;
+  points.action = 0;
+  points.color.g = 1;
+  points.color.a = 1;
+  points.lifetime = ros::Duration(0);
+  points.frame_locked = true;
+  points.pose.orientation.w = 1.0;
+  points.scale.x = 0.05;
+  points.scale.y = 0.05;
+
 	//Initialize the ROS framework
   ros::init(argc,argv,"main_control");
   ros::NodeHandle n;
@@ -230,14 +265,6 @@ int main(int argc, char **argv)
   ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
   pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
   marker_pub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1, true);
-
-  visualization_msgs::Marker arrow;
-  arrow.type = visualization_msgs::Marker::ARROW;
-  arrow.action = 0;
-  arrow.color.g = 1;
-  arrow.color.a = 1;
-  arrow.lifetime = ros::Duration(1/20);
-  arrow.frame_locked = false;
 
   //Velocity control variable
   geometry_msgs::Twist vel;
@@ -255,14 +282,6 @@ int main(int argc, char **argv)
   	vel.angular.z = 0; // set angular speed
 
   	velocity_publisher.publish(vel); // Publish the command velocity
-
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-      arrow.pose.position.x = particle_set[i].x(0);
-      arrow.pose.position.y = particle_set[i].x(1);
-      tf::Quaternion q = tf::createQuaternionFromYaw(particle_set[i].x(2));
-      tf::quaternionTFToMsg(q, arrow.pose.orientation);
-      marker_pub.publish(arrow);
-    }
     ROS_INFO("UPDATED");
   }
 
