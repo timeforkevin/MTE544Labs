@@ -106,9 +106,9 @@ void odom_callback(nav_msgs::Odometry msg) {
   odom_cov << msg.twist.covariance[0], msg.twist.covariance[1], msg.twist.covariance[5],
               msg.twist.covariance[6], msg.twist.covariance[7], msg.twist.covariance[11],
               msg.twist.covariance[30], msg.twist.covariance[31], msg.twist.covariance[35];
-  odom_cov(0, 0) = MAX(odom_cov(0, 0), 0.1);
-  odom_cov(1, 1) = MAX(odom_cov(1, 1), 0.1);
-  odom_cov(2, 2) = MAX(odom_cov(2, 2), 0.1);
+  odom_cov(0, 0) = MAX(odom_cov(0, 0), 0.05);
+  odom_cov(1, 1) = MAX(odom_cov(1, 1), 0.05);
+  odom_cov(2, 2) = MAX(odom_cov(2, 2), 0.05);
 
 
   ros::Time now = ros::Time::now();
@@ -189,12 +189,13 @@ void prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::
       p->x(2) += 2*M_PI;
     }
   }
+  ROS_INFO("MOTION MODEL");
 }
 
 void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   static double varx = 1;
   static double vary = 1;
-  static double varyaw = 1;
+  static double varyaw = 2;
 
   // Set Weights
   for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -209,8 +210,7 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
     }
 
     p->weight = exp(-(diffx*diffx/varx +
-                      diffy*diffy/vary +
-                      diffyaw*diffyaw/varyaw)/2);
+                      diffy*diffy/vary)/2);
   }
 
   // Calculate CDF of particles
@@ -226,11 +226,12 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   for (int i = 0; i < NUM_PARTICLES; i++) {
     int sample_index = map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES);
     particle *sampled = &particle_set[sample_index];
-    ROS_INFO("i:%d w:%f", sample_index, sampled->weight, sampled->x(0));
+    // ROS_INFO("i:%d w:%f", sample_index, sampled->weight, sampled->x(0));
     memcpy(&new_particle_set[i], sampled, sizeof(particle));
   }
   free(particle_set);
   particle_set = new_particle_set;
+  ROS_INFO("RESAMPLE w = %f", running_sum);
 }
 
 int main(int argc, char **argv)
@@ -288,7 +289,6 @@ int main(int argc, char **argv)
   	vel.angular.z = 0; // set angular speed
 
   	velocity_publisher.publish(vel); // Publish the command velocity
-    ROS_INFO("UPDATED");
   }
 
   free(particle_set);
