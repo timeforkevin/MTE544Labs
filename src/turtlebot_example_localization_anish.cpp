@@ -10,18 +10,23 @@
 // //////////////////////////////////////////////////////////
 
 #include <ros/ros.h>
-#include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
 #include <tf/transform_datatypes.h>
+#include <gazebo_msgs/ModelStates.h>
+#include <visualization_msgs/Marker.h>
+#include <random>
 
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
 geometry_msgs::Twist odom_input;
 
 
-void pose_callback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg)
-{
-	//This function is called when a new position message is received
+// Function defns
+void prediction_update();
+void measurement_update();
+
+void pose_callback(const gazebo_msgs::ModelStates& message) {
 
 	X = msg->pose.pose.position.x; // Robot X psotition
 	Y = msg->pose.pose.position.y; // Robot Y psotition
@@ -31,12 +36,13 @@ void pose_callback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg
 
 int main(int argc, char **argv)
 {
-	//Initialize the ROS framework
+		//Initialize the ROS framework
     ros::init(argc,argv,"main_control");
     ros::NodeHandle n;
 
     //Subscribe to the desired topics and assign callbacks
-    ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
+    ros::Subscriber odom_sub = n.subscribe("/odom", 1, odom_callback);
+		ros::Subscriber ips_sub = n.subscrive("/gazebo/model_states", 1, )
 
     //Setup topics to Publish from this node
     ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/teleop", 1);
