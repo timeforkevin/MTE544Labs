@@ -37,8 +37,8 @@
 #define NUM_PARTICLES 100
 
 #define POINT_IN_MAP(X,Y) (X > -1 && X < MAP_WIDTH && Y > -1 && Y < MAP_WIDTH)
-#define FRAND_TO(X) (static_cast <double> (rand()) / (static_cast <double> (RAND_MAX/X)))
-#define MIN(X,Y) ((X) < (Y) ? (X) : (Y))
+#define FRAND_TO(X) (static_cast <double> (rand()) / (static_cast <double> (RAND_MAX/(X))))
+#define MAX(X,Y) ((X) > (Y) ? (X) : (Y))
 
 typedef unsigned char uint8;
 typedef char int8;
@@ -54,8 +54,6 @@ ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
 
 visualization_msgs::Marker points;
-geometry_msgs::Twist odom_input;
-Matrix3d odom_cov;
 ros::Time last_pred;
 ros::Time last_ips;
 particle *particle_set;
@@ -65,11 +63,7 @@ std::mt19937 e2(rd());
 
 
 // Function Prototypes
-void update_map();
-float logit(float p);
-float i_logit(float l);
-void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<int>& y);
-void prediction_update(ros::Duration dt);
+void prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::Duration dt);
 void measurement_update(double ips_x, double ips_y, double ips_yaw);
 
 short sgn(int x) { return x >= 0 ? 1 : -1; }
@@ -78,7 +72,7 @@ short sgn(int x) { return x >= 0 ? 1 : -1; }
 void pose_callback(const gazebo_msgs::ModelStates& msg) {
   static std::normal_distribution<double> dist(0.0, 1);
   ros::Time now = ros::Time::now();
-  if (now - last_ips > ros::Duration(1)) {
+  if (now - last_ips > ros::Duration(0.25)) {
     int i;
     for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
     double ips_x = msg.pose[i].position.x + dist(e2);
@@ -107,19 +101,21 @@ void odom_callback(nav_msgs::Odometry msg) {
     last_pred = ros::Time::now();
     return;
   }
-  odom_input = msg.twist.twist;
+  geometry_msgs::Twist odom_input = msg.twist.twist;
+  Matrix3d odom_cov;
   odom_cov << msg.twist.covariance[0], msg.twist.covariance[1], msg.twist.covariance[5],
               msg.twist.covariance[6], msg.twist.covariance[7], msg.twist.covariance[11],
               msg.twist.covariance[30], msg.twist.covariance[31], msg.twist.covariance[35];
-  // odom_cov(0, 0) = MIN(odom_cov(0, 0), 0.01);
-  // odom_cov(1, 1) = MIN(odom_cov(1, 1), 0.01);
-  // odom_cov(2, 2) = MIN(odom_cov(2, 2), 0.01);
+  odom_cov(0, 0) = MAX(odom_cov(0, 0), 0.1);
+  odom_cov(1, 1) = MAX(odom_cov(1, 1), 0.1);
+  odom_cov(2, 2) = MAX(odom_cov(2, 2), 0.1);
 
 
   ros::Time now = ros::Time::now();
-  prediction_update(now - last_pred);
+  prediction_update(odom_input, odom_cov, now - last_pred);
 
   points.header.stamp = ros::Time::now();
+  points.points.clear();
   for (int i = 0; i < NUM_PARTICLES; i++) {
     geometry_msgs::Point p;
     p.x = particle_set[i].x(0);
@@ -158,12 +154,15 @@ int map_to_cdf(double sample, double *cdf, int cdf_size) {
 }
 
 /// Update with Motion Model
-void prediction_update(ros::Duration dt) {
+void prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::Duration dt) {
   static std::normal_distribution<double> dist(0.0, 1);
+  Vector3d randn;
 
   Eigen::EigenSolver<Matrix3d> es(odom_cov);
   Vector3d lambda = es.eigenvalues().cwiseAbs();
   Matrix3d E = es.eigenvectors().cwiseAbs();
+
+  // std::cout << std::endl << odom_cov << std::endl;
 
   for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *p = &particle_set[i];
@@ -174,11 +173,15 @@ void prediction_update(ros::Duration dt) {
          odom_input.angular.z;
 
     // Add disturbance
-    Vector3d delta = E*lambda.cwiseSqrt()*dist(e2);
+    randn << dist(e2),
+             dist(e2),
+             dist(e2);
+    Vector3d delta = E*lambda.cwiseSqrt();
+    delta = (delta.array()*randn.array()).matrix();
 
-    p->x += Bu*dt.toSec() + delta;
-    ROS_INFO("delta: %f, %f, %f", delta(0), delta(1), delta(2));
-    ROS_INFO("E*lambda: %f, %f, %f", E*lambda(0), E*lambda(1), E*lambda(2));
+    p->x += (Bu + delta)*dt.toSec();
+    // ROS_INFO("delta: %f, %f, %f", delta(0), delta(1), delta(2));
+    // ROS_INFO("E*lambda: %f, %f, %f", E*lambda(0), E*lambda(1), E*lambda(2));
     // Maintain yaw between +-pi
     if (p->x(2) > M_PI) {
       p->x(2) -= 2*M_PI;
@@ -189,9 +192,9 @@ void prediction_update(ros::Duration dt) {
 }
 
 void measurement_update(double ips_x, double ips_y, double ips_yaw) {
-  static double varx = 0.1;
-  static double vary = 0.1;
-  static double varyaw = 0.1;
+  static double varx = 1;
+  static double vary = 1;
+  static double varyaw = 1;
 
   // Set Weights
   for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -221,7 +224,9 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   // Resample
   particle *new_particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
   for (int i = 0; i < NUM_PARTICLES; i++) {
-    particle *sampled = &particle_set[map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES)];
+    int sample_index = map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES);
+    particle *sampled = &particle_set[sample_index];
+    ROS_INFO("i:%d w:%f", sample_index, sampled->weight, sampled->x(0));
     memcpy(&new_particle_set[i], sampled, sizeof(particle));
   }
   free(particle_set);
@@ -236,6 +241,7 @@ int main(int argc, char **argv)
     p->x << FRAND_TO(10) + MAP_ORIGIN_X,
             FRAND_TO(10) + MAP_ORIGIN_Y,
             FRAND_TO(2*M_PI) - M_PI;
+    ROS_INFO("yaw:%f", p->x(2));
   }
 
   points.header.frame_id = "map";
