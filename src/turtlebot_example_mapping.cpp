@@ -40,7 +40,6 @@
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
 
-typedef unsigned char uint8;
 typedef char int8;
 
 int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];

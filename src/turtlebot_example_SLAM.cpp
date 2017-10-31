@@ -26,14 +26,12 @@
 
 #include "kdtree.h"
 
-#define YAW_OFFSET 0
-#define IMAGE_WIDTH 640
-
 #define MAP_WIDTH 100
 #define MAP_RESOLUTION 0.1
 #define MAP_ORIGIN_X (-5)
 #define MAP_ORIGIN_Y (-5)
 
+#define EPS 0.02
 #define P_SENSE 0.8
 #define P_UNSENSE 0.4
 #define MAX_SENSE 4.5
@@ -58,6 +56,11 @@ typedef struct {
   double weight;
 } particle;
 
+typedef char int8;
+
+int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];
+float logit_occupancy_grid[MAP_WIDTH*MAP_WIDTH];
+
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
 
@@ -78,25 +81,28 @@ std::vector<Vector2d> last_scan_list;
 // Function Prototypes
 void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::Duration dt);
 void motion_model_prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::Duration dt);
-void measurement_update(double ips_x, double ips_y, double ips_yaw);
+void scan_registration_measurement_model(const sensor_msgs::LaserScan msg);
+void map_update(const sensor_msgs::LaserScan msg);
+float logit(float p);
+float i_logit(float l);
+void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<int>& y);
 
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
-//Callback function for the Position topic (SIMULATION)
-void pose_callback(const gazebo_msgs::ModelStates& msg) {
-  static std::normal_distribution<double> dist(0.0, 1);
-  ros::Time now = ros::Time::now();
-  if (now - last_ips > ros::Duration(2)) {
-    int i;
-    for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-    double ips_x = msg.pose[i].position.x + dist(e2);
-    double ips_y = msg.pose[i].position.y + dist(e2);
-    double ips_yaw = tf::getYaw(msg.pose[i].orientation) + dist(e2);
-    measurement_update(ips_x, ips_y, ips_yaw);
-    // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
-    last_ips = now;
-  }
-}
+// //Callback function for the Position topic (SIMULATION)
+// void pose_callback(const gazebo_msgs::ModelStates& msg) {
+//   static std::normal_distribution<double> dist(0.0, 1);
+//   ros::Time now = ros::Time::now();
+//   if (now - last_ips > ros::Duration(2)) {
+//     int i;
+//     for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
+//     double ips_x = msg.pose[i].position.x + dist(e2);
+//     double ips_y = msg.pose[i].position.y + dist(e2);
+//     double ips_yaw = tf::getYaw(msg.pose[i].orientation) + dist(e2);
+//     measurement_update(ips_x, ips_y, ips_yaw);
+//     last_ips = now;
+//   }
+// }
 
 //Callback function for the Position topic (LIVE)
 /*
@@ -148,7 +154,8 @@ void image_callback(const sensor_msgs::LaserScan msg) {
   }
   ros::Time now = ros::Time::now();
   scan_registration_prediction_update(msg, now - last_scan_reg_pred);
-
+  scan_registration_measurement_model(msg);
+  map_update(msg);
   points.header.stamp = ros::Time::now();
   points.points.clear();
   for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -380,25 +387,106 @@ int map_to_cdf(double sample, double *cdf, int cdf_size) {
   return i_begin;
 }
 
-void measurement_update(double ips_x, double ips_y, double ips_yaw) {
-  static double varx = 1;
-  static double vary = 1;
-  static double varyaw = 2;
+float i_logit(float l) {
+    float exp_l = exp(l);
+    return exp_l/(1+exp_l);
+}
 
-  // Set Weights
-  for (int i = 0; i < NUM_PARTICLES; i++) {
-    particle *p = &particle_set[i];
-    double diffx = p->x(0) - ips_x;
-    double diffy = p->x(1) - ips_y;
-    double diffyaw = p->x(2) - ips_yaw;
-    if (diffyaw > M_PI) {
-      diffyaw -= 2*M_PI;
-    } else if (diffyaw < -M_PI) {
-      diffyaw += 2*M_PI;
+float logit(float p) {
+    return log(p/(1-p));
+}
+
+//Bresenham line algorithm (pass empty vectors)
+// Usage: (x0, y0) is the first point and (x1, y1) is the second point. The calculated
+//        points (x, y) are stored in the x and y vector. x and y should be empty 
+//    vectors of integers and shold be defined where this function is called from.
+void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<int>& y) {
+
+  int dx = abs(x1 - x0);
+  int dy = abs(y1 - y0);
+  int dx2 = x1 - x0;
+  int dy2 = y1 - y0;
+  
+  const bool s = abs(dy) > abs(dx);
+
+  if (s) {
+    int dx2 = dx;
+    dx = dy;
+    dy = dx2;
+  }
+
+  int inc1 = 2 * dy;
+  int d = inc1 - dx;
+  int inc2 = d - dx;
+
+  x.push_back(x0);
+  y.push_back(y0);
+
+  while (x0 != x1 || y0 != y1) {
+    if (s) y0+=sgn(dy2); else x0+=sgn(dx2);
+    if (d < 0) d += inc1;
+    else {
+      d += inc2;
+      if (s) x0+=sgn(dx2); else y0+=sgn(dy2);
     }
 
-    p->weight = exp(-(diffx*diffx/varx +
-                      diffy*diffy/vary)/2);
+    //Add point to vector
+    x.push_back(x0);
+    y.push_back(y0);
+  }
+}
+
+
+void scan_registration_measurement_model(const sensor_msgs::LaserScan msg) {
+  for (int i = 0; i < NUM_PARTICLES; i++) {
+    particle *p = &particle_set[i];
+    p->weight = 0;
+
+    int x_map_idx = round((p->x(0) - MAP_ORIGIN_X)/MAP_RESOLUTION);
+    int y_map_idx = round((p->x(1) - MAP_ORIGIN_Y)/MAP_RESOLUTION);
+    std::vector<int> line_x;
+    std::vector<int> line_y;
+    int prev_endpoint_x = 0;
+    int prev_endpoint_y = 0;
+
+    float fov = msg.angle_max - msg.angle_min;
+    int num_points = abs(fov / msg.angle_increment);
+    for (int j = 0; j < num_points; j += 2) {
+      line_x.clear();
+      line_y.clear();
+      double theta = p->x(2) + msg.angle_min + i*msg.angle_increment;
+
+      // TODO implement median filter to use the NaN ranges
+      float range = msg.ranges[i];
+      if (std::isnan(range)) {
+        continue;
+      }
+      range = (range > msg.range_max) ? msg.range_max : range;
+      int endpoint_x = x_map_idx + range / MAP_RESOLUTION * cos(theta);
+      int endpoint_y = y_map_idx + range / MAP_RESOLUTION * sin(theta);
+      // Do not draw the same line twice
+      if (endpoint_x == prev_endpoint_x &&
+          endpoint_y == prev_endpoint_y) {
+        continue;
+      }
+      bresenham(x_map_idx, y_map_idx, endpoint_x, endpoint_y, line_x, line_y);
+      while(!line_x.empty()) {
+        int next_x = line_x.back();
+        int next_y = line_y.back();
+        line_x.pop_back();
+        line_y.pop_back();
+        // Do not evaluate points off map
+        if (POINT_IN_MAP(next_x, next_y)) {
+          p->weight -= logit_occupancy_grid[next_x*MAP_WIDTH + next_y];
+        }
+      }
+      if (range < MAX_SENSE && POINT_IN_MAP(endpoint_x, endpoint_y)) {
+        p->weight += logit_occupancy_grid[endpoint_x*MAP_WIDTH + endpoint_y];
+      }
+      p->weight = i_logit(p->weight);
+      prev_endpoint_x = endpoint_x;
+      prev_endpoint_y = endpoint_y;
+    }
   }
 
   // Calculate CDF of particles
@@ -422,7 +510,69 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   // ROS_INFO("RESAMPLE w = %f", running_sum);
 }
 
+void map_update(const sensor_msgs::LaserScan msg) {
+for (int i = 0; i < NUM_PARTICLES; i++) {
+    particle *p = &particle_set[i];
+    p->weight = 0;
 
+    int x_map_idx = round((p->x(0) - MAP_ORIGIN_X)/MAP_RESOLUTION);
+    int y_map_idx = round((p->x(1) - MAP_ORIGIN_Y)/MAP_RESOLUTION);
+    std::vector<int> line_x;
+    std::vector<int> line_y;
+    int prev_endpoint_x = 0;
+    int prev_endpoint_y = 0;
+
+    float fov = msg.angle_max - msg.angle_min;
+    int num_points = abs(fov / msg.angle_increment);
+    for (int j = 0; j < num_points; j += 2) {
+      line_x.clear();
+      line_y.clear();
+      double theta = p->x(2) + msg.angle_min + i*msg.angle_increment;
+
+      // TODO implement median filter to use the NaN ranges
+      float range = msg.ranges[i];
+      if (std::isnan(range)) {
+        continue;
+      }
+      range = (range > msg.range_max) ? msg.range_max : range;
+      int endpoint_x = x_map_idx + range / MAP_RESOLUTION * cos(theta);
+      int endpoint_y = y_map_idx + range / MAP_RESOLUTION * sin(theta);
+      // Do not draw the same line twice
+      if (endpoint_x == prev_endpoint_x &&
+          endpoint_y == prev_endpoint_y) {
+        continue;
+      }
+      bresenham(x_map_idx, y_map_idx, endpoint_x, endpoint_y, line_x, line_y);
+      while(!line_x.empty()) {
+        int next_x = line_x.back();
+        int next_y = line_y.back();
+        line_x.pop_back();
+        line_y.pop_back();
+        // Do not evaluate points off map
+        if (POINT_IN_MAP(next_x, next_y)) {
+          logit_occupancy_grid[next_x*MAP_WIDTH + next_y] += logit(P_UNSENSE);
+        }
+      }
+      if (range < MAX_SENSE && POINT_IN_MAP(endpoint_x, endpoint_y)) {
+        logit_occupancy_grid[endpoint_x*MAP_WIDTH + endpoint_y] += logit(P_SENSE);
+      }
+      prev_endpoint_x = endpoint_x;
+      prev_endpoint_y = endpoint_y;
+    }
+  }
+}
+
+void update_occupancy_grid() {
+  for (int i = 0; i < MAP_WIDTH; i++) {
+    for (int j = 0; j < MAP_WIDTH; j++) {
+      if (fabs(logit_occupancy_grid[i*MAP_WIDTH + j]) < EPS) {
+        occupancy_grid[i*MAP_WIDTH + j] = 50;
+      } else {
+        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(logit_occupancy_grid[i*MAP_WIDTH + j]) * 100);
+      }
+    }
+  }
+}
 
 int main(int argc, char **argv)
 {
@@ -450,7 +600,7 @@ int main(int argc, char **argv)
   ros::NodeHandle n;
 
   //Subscribe to the desired topics and assign callbacks
-  ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
+  // ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
   ros::Subscriber odom_sub = n.subscribe("/odom", 1, odom_callback);
   ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
   ros::Subscriber kinect_sub = n.subscribe("/scan", 1, image_callback);
@@ -459,9 +609,19 @@ int main(int argc, char **argv)
   ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
   pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
   marker_pub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1, true);
+  ros::Publisher grid_publisher = n.advertise<nav_msgs::OccupancyGrid>("/map", 2);
 
   //Velocity control variable
   geometry_msgs::Twist vel;
+
+
+  nav_msgs::OccupancyGrid occ_grid_msg;
+  
+  occ_grid_msg.info.resolution = MAP_RESOLUTION;
+  occ_grid_msg.info.width = MAP_WIDTH;
+  occ_grid_msg.info.height = MAP_WIDTH;
+  occ_grid_msg.info.origin.position.x = MAP_ORIGIN_X;
+  occ_grid_msg.info.origin.position.y = MAP_ORIGIN_Y;
 
   //Set the loop rate
   ros::Rate loop_rate(20);    //20Hz update rate
@@ -476,6 +636,10 @@ int main(int argc, char **argv)
   	vel.angular.z = 0; // set angular speed
 
   	velocity_publisher.publish(vel); // Publish the command velocity
+    update_occupancy_grid();
+    occ_grid_msg.data = std::vector<signed char>(occupancy_grid, occupancy_grid+MAP_WIDTH*MAP_WIDTH);
+
+    grid_publisher.publish(occ_grid_msg);
   }
 
   free(particle_set);
