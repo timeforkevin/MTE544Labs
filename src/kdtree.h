@@ -5,15 +5,15 @@
 #include <limits>
 #include <Eigen/Dense>
 
-typedef Eigen::Matrix<double, 3, 1> Vector3d;
+typedef Eigen::Matrix<double, 2, 1> Vector2d;
 
 typedef struct kd_node_t {
-  Vector3d point;
+  Vector2d point;
   kd_node_t *before;
   kd_node_t *after;
 } kd_node;
 
-kd_node* create_2d_tree(std::vector<Vector3d>& points, int depth) {
+kd_node* create_2d_tree(std::vector<Vector2d>& points, int depth) {
   if (!points.size()) {
     return NULL;
   }
@@ -22,8 +22,8 @@ kd_node* create_2d_tree(std::vector<Vector3d>& points, int depth) {
   // Choose median randomly
   int median_idx = rand() % points.size();
   node->point = points[median_idx];
-  std::vector<Vector3d> before_median;
-  std::vector<Vector3d> after_median;
+  std::vector<Vector2d> before_median;
+  std::vector<Vector2d> after_median;
 
   for(int i = 0; i < points.size(); i++) {
     if (i != median_idx) {
@@ -40,8 +40,8 @@ kd_node* create_2d_tree(std::vector<Vector3d>& points, int depth) {
   return node;
 }
 
-float nearest_neighbour_squared_2d(kd_node* root, Vector3d& search_point, int depth) {
-  float cur_best = std::numeric_limits<float>::infinity();
+double nearest_neighbour_squared_2d(kd_node* root, Vector2d& search_point, int depth) {
+  double cur_best = std::numeric_limits<double>::infinity();
   // Recursively traverse
   if (search_point[depth % 2] < root->point[depth % 2]) {
     if (root->before != NULL) {
@@ -53,7 +53,7 @@ float nearest_neighbour_squared_2d(kd_node* root, Vector3d& search_point, int de
     }
   }
 
-  float cur_dist = (search_point[0] - root->point[0]) *
+  double cur_dist = (search_point[0] - root->point[0]) *
                    (search_point[0] - root->point[0]) *
                    (search_point[1] - root->point[1]) *
                    (search_point[1] - root->point[1]);
@@ -61,7 +61,7 @@ float nearest_neighbour_squared_2d(kd_node* root, Vector3d& search_point, int de
     cur_best = cur_dist;
   }
 
-  float radius = sqrt(cur_best);
+  double radius = sqrt(cur_best);
   if (search_point[depth % 2] < root->point[depth % 2] &&
      (search_point[depth % 2] + radius > root->point[depth % 2])) {
     if (root->after != NULL) {

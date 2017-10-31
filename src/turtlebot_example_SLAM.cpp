@@ -39,15 +39,19 @@
 #define MAX_SENSE 4.5
 
 #define NUM_PARTICLES 100
-#define ICP_ITERATIONS 50
+#define ICP_ITERATIONS 20
 
 #define POINT_IN_MAP(X,Y) (X > -1 && X < MAP_WIDTH && Y > -1 && Y < MAP_WIDTH)
 #define FRAND_TO(X) (static_cast <double> (rand()) / (static_cast <double> (RAND_MAX/(X))))
 #define MAX(X,Y) ((X) > (Y) ? (X) : (Y))
 
+#define USE_KD_TREE
+
 typedef unsigned char uint8;
 typedef char int8;
 typedef Eigen::Matrix<double, 3, 3> Matrix3d;
+typedef Eigen::Matrix<double, 3, 1> Vector3d;
+typedef Eigen::Rotation2D<double> Rotation2D;
 
 typedef struct {
   Vector3d x;
@@ -58,18 +62,21 @@ ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
 
 visualization_msgs::Marker points;
-ros::Time last_pred;
+ros::Time last_motion_model_pred;
+ros::Time last_scan_reg_pred;
 ros::Time last_ips;
 particle *particle_set;
 
 std::random_device rd;
 std::mt19937 e2(rd());
 
-std::vector<Vector3d> last_scan_list;
-// kd_node *last_scan_tree;
+#ifdef USE_KD_TREE
+kd_node *last_scan_tree;
+#endif
+std::vector<Vector2d> last_scan_list;
 
 // Function Prototypes
-void scan_registration_prediction_update(const sensor_msgs::LaserScan msg);
+void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::Duration dt);
 void motion_model_prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::Duration dt);
 void measurement_update(double ips_x, double ips_y, double ips_yaw);
 
@@ -79,7 +86,7 @@ short sgn(int x) { return x >= 0 ? 1 : -1; }
 void pose_callback(const gazebo_msgs::ModelStates& msg) {
   static std::normal_distribution<double> dist(0.0, 1);
   ros::Time now = ros::Time::now();
-  if (now - last_ips > ros::Duration(0.25)) {
+  if (now - last_ips > ros::Duration(2)) {
     int i;
     for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
     double ips_x = msg.pose[i].position.x + dist(e2);
@@ -104,8 +111,8 @@ void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
 }*/
 
 void odom_callback(nav_msgs::Odometry msg) {
-  if (last_pred.isZero()) {
-    last_pred = ros::Time::now();
+  if (last_motion_model_pred.isZero()) {
+    last_motion_model_pred = ros::Time::now();
     return;
   }
   geometry_msgs::Twist odom_input = msg.twist.twist;
@@ -119,7 +126,28 @@ void odom_callback(nav_msgs::Odometry msg) {
 
 
   ros::Time now = ros::Time::now();
-  motion_model_prediction_update(odom_input, odom_cov, now - last_pred);
+  // motion_model_prediction_update(odom_input, odom_cov, now - last_motion_model_pred);
+
+  // points.header.stamp = ros::Time::now();
+  // points.points.clear();
+  // for (int i = 0; i < NUM_PARTICLES; i++) {
+  //   geometry_msgs::Point p;
+  //   p.x = particle_set[i].x(0);
+  //   p.y = particle_set[i].x(1);
+  //   points.points.push_back(p);
+  // }
+  // marker_pub.publish(points);
+
+  last_motion_model_pred = now;
+}
+
+void image_callback(const sensor_msgs::LaserScan msg) {
+  if (last_scan_reg_pred.isZero()) {
+    last_scan_reg_pred = ros::Time::now();
+    return;
+  }
+  ros::Time now = ros::Time::now();
+  scan_registration_prediction_update(msg, now - last_scan_reg_pred);
 
   points.header.stamp = ros::Time::now();
   points.points.clear();
@@ -131,7 +159,7 @@ void odom_callback(nav_msgs::Odometry msg) {
   }
   marker_pub.publish(points);
 
-  last_pred = now;
+  last_scan_reg_pred = now;
 }
 
 //Callback function for the map
@@ -141,54 +169,101 @@ void map_callback(const nav_msgs::OccupancyGrid& msg)
     //you probably want to save the map into a form which is easy to work with
 }
 
-void image_callback(const sensor_msgs::LaserScan msg) {
-  scan_registration_prediction_update(msg);
+double nearest_neighbour_squared_brute_force(std::vector<Vector2d>& last_scan_list,
+                                            Vector2d new_scan_point) {
+  double cur_best = std::numeric_limits<double>::infinity();
+  for (int k = 0; k < last_scan_list.size(); k++) {
+    double cur_dist = (new_scan_point[0] - last_scan_list[k][0]) *
+                     (new_scan_point[0] - last_scan_list[k][0]) *
+                     (new_scan_point[1] - last_scan_list[k][1]) *
+                     (new_scan_point[1] - last_scan_list[k][1]);
+    if (cur_dist < cur_best) {
+      cur_best = cur_dist;
+    }
+  }
+  return cur_best;
 }
 
-float iterative_closest_point(std::vector<Vector3d>& new_scan_list,
-                              Matrix3d TR, Vector3d TT) {
-  float MMSE = 0;
-  for (int j = 0; j < new_scan_list.size(); j++) {
-    new_scan_list[j] = TR*new_scan_list[j] + TT;
+double calc_mmse(std::vector<Vector2d>& scan_list,
+                Rotation2D& TR, Vector2d& TT) {
+  double mmse = 0;
+  for (int j = 0; j < scan_list.size(); j++) {
+    Vector2d transformed_point = TR*scan_list[j] + TT;
 #ifdef USE_KD_TREE
-    float cur_best = nearest_neighbour_squared_2d(last_scan_tree, new_scan_list[j], 0);
+    double cur_best = nearest_neighbour_squared_2d(last_scan_tree, transformed_point, 0);
 #else
-    float cur_best = std::numeric_limits<float>::infinity();
-    for (int k = 0; k < last_scan_list.size(); k++) {
-      float cur_dist = (new_scan_list[j][0] - last_scan_list[k][0]) *
-                       (new_scan_list[j][0] - last_scan_list[k][0]) *
-                       (new_scan_list[j][1] - last_scan_list[k][1]) *
-                       (new_scan_list[j][1] - last_scan_list[k][1]);
-      if (cur_dist < cur_best) {
-        cur_best = cur_dist;
+    double cur_best = nearest_neighbour_squared_brute_force(last_scan_list, transformed_point);
+#endif
+    mmse += cur_best;
+  }
+  mmse /= scan_list.size();
+  return mmse;
+}
+
+void iterative_closest_point(std::vector<Vector2d> scan_list,
+                             Rotation2D& TR, Vector2d& TT) {
+  double eps = 0.0001;
+  double gamma = 10;
+  Vector2d dx(eps, 0.0);
+  Vector2d dy(0.0, eps);
+  Rotation2D dr(eps);
+  double mmse = 0.0;
+  double dm_dx = 0.0;
+  double dm_dy = 0.0;
+  double dm_dr = 0.0;
+  bool failed = false;
+  for (int i = 0; i < ICP_ITERATIONS; i++) {
+#ifdef USE_SVD
+
+#else
+    // Gradient Descent
+    if (!failed) {
+      Vector2d TTdx = TT+dx;
+      Vector2d TTdy = TT+dy;
+      Rotation2D TRdr = TR*dr;
+      mmse = calc_mmse(scan_list, TR, TT);
+      dm_dx = (calc_mmse(scan_list, TR, TTdx) - mmse)/eps;
+      dm_dy = (calc_mmse(scan_list, TR, TTdy) - mmse)/eps;
+      dm_dr = (calc_mmse(scan_list, TRdr, TT) - mmse)/eps;
+    }
+
+    Rotation2D R(-gamma*dm_dr);
+    Vector2d T(-gamma*dm_dx, -gamma*dm_dy);
+    R *= TR;
+    T = R*TT + T;
+
+    double next_mmse = calc_mmse(scan_list, R, T);
+    // ROS_INFO("MMSE: %.4e NEXTMMSE:%.4e gamma: %f", mmse, next_mmse, gamma);
+    if (next_mmse < mmse) {
+      TR = R;
+      TT = T;
+      if (!failed) {
+        gamma *= 2;
       }
+      failed = false;
+    } else {
+      failed = true;
+      gamma /= 2;
     }
 #endif
-
-    MMSE += cur_best;
   }
-  MMSE /= new_scan_list.size();
+  ROS_INFO("MMSE: %.4e X:%.4f Y:%.4f R:%.4e", mmse, TT(0), TT(1), TR.angle());
+
 }
 
-Vector3d centroid_difference(std::vector<Vector3d> last_scan_list,
-                             std::vector<Vector3d> new_scan_list) {
-  Vector3d last_centroid = Vector3d::Zero();
-  for (int i = 0; i < last_scan_list.size(); i++) {
-    last_centroid[0] += last_scan_list[i][0];
-    last_centroid[1] += last_scan_list[i][1];
+Vector2d centroid(std::vector<Vector2d> list) {
+  Vector2d centroid = Vector2d::Zero();
+  for (int i = 0; i < list.size(); i++) {
+    centroid += list[i];
   }
-  last_centroid = 1.0/last_scan_list.size() * last_centroid;
-  Vector3d new_centroid = Vector3d::Zero();
-  for (int i = 0; i < new_scan_list.size(); i++) {
-    new_centroid[0] += new_scan_list[i][0];
-    new_centroid[1] += new_scan_list[i][1];
-  }
-  new_centroid = 1.0/new_scan_list.size() * new_centroid;
-  return last_centroid - new_centroid;
+  centroid /= list.size();
+  return centroid;
 }
 
-void scan_registration_prediction_update(const sensor_msgs::LaserScan msg) {
-  std::vector<Vector3d> new_scan_list;
+void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::Duration dt) {
+  static std::normal_distribution<double> dist(0.0, 0.01);
+  std::vector<Vector2d> new_scan_list;
+  std::vector<Vector2d> icp_scan_list;
   float fov = msg.angle_max - msg.angle_min;
   int num_points = abs(fov / msg.angle_increment);
   for (int i = 0; i < num_points; i++) {
@@ -197,25 +272,37 @@ void scan_registration_prediction_update(const sensor_msgs::LaserScan msg) {
     if (std::isnan(range)) {
       continue;
     }
-    Vector3d p;
+    Vector2d p;
     p[0] = range * cos(theta);
     p[1] = range * sin(theta);
     new_scan_list.push_back(p);
-  }
-
-  if (new_scan_list.size() && last_scan_list.size()) {
-    // Match centroids
-    Vector3d TT = centroid_difference(last_scan_list, new_scan_list);
-    Matrix3d TR = Matrix3d::Ones();
-    for (int i = 0; i < ICP_ITERATIONS; i++) {
-      float MMSE = iterative_closest_point(new_scan_list, TR, TT);
+    if (abs(theta) < fov / 4) {
+      icp_scan_list.push_back(p);
     }
   }
-  last_scan_list = new_scan_list;
+
+  // Match centroids
+  Vector2d TT = centroid(last_scan_list) - centroid(new_scan_list);
+  Rotation2D TR(0);
+  if (icp_scan_list.size() && last_scan_list.size()) {
+    iterative_closest_point(icp_scan_list, TR, TT);
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+      particle *p = &particle_set[i];
+      Vector2d x;
+      x << p->x(0), p->x(1);
+      x = TR*x + TT;
+      x(0) += dist(e2);
+      x(1) += dist(e2);
+      p->x(0) = x(0);
+      p->x(1) = x(1);
+      p->x(2) += TR.angle();
+    }
+  }
 #ifdef USE_KD_TREE
   destroy_kd_tree(last_scan_tree);
   last_scan_tree = create_2d_tree(new_scan_list, 0);
 #endif
+  last_scan_list = new_scan_list;
 }
 
 /// Update with Motion Model
@@ -254,7 +341,7 @@ void motion_model_prediction_update(geometry_msgs::Twist odom_input, Matrix3d od
       p->x(2) += 2*M_PI;
     }
   }
-  ROS_INFO("MOTION MODEL");
+  // ROS_INFO("MOTION MODEL");
 }
 
 
@@ -312,7 +399,7 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   }
   free(particle_set);
   particle_set = new_particle_set;
-  ROS_INFO("RESAMPLE w = %f", running_sum);
+  // ROS_INFO("RESAMPLE w = %f", running_sum);
 }
 
 
@@ -322,10 +409,7 @@ int main(int argc, char **argv)
   particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
   for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *p = &particle_set[i];
-    p->x << FRAND_TO(10) + MAP_ORIGIN_X,
-            FRAND_TO(10) + MAP_ORIGIN_Y,
-            FRAND_TO(2*M_PI) - M_PI;
-    ROS_INFO("yaw:%f", p->x(2));
+    p->x << 0, 0, 0;
   }
 
   points.header.frame_id = "map";
