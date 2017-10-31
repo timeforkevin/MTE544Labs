@@ -20,7 +20,7 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/LaserScan.h>
-#include <Eigen/Dense>
+#include <eigen3/Eigen/Dense>
 #include <random>
 #include <limits>
 

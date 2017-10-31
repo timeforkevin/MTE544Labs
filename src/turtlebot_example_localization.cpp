@@ -19,7 +19,7 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Image.h>
-#include <Eigen/Dense>
+#include <eigen3/Eigen/Dense>
 #include <random>
 
 #define YAW_OFFSET 0

@@ -92,14 +92,36 @@ void update_map(const sensor_msgs::LaserScan msg) {
 
   float fov = msg.angle_max - msg.angle_min;
   int num_points = abs(fov / msg.angle_increment);
-  ROS_INFO("RANGE: %f", msg.ranges[num_points/2]);
-  for (int i = 0; i < num_points; i += 2) {
+  std::vector<float> ranges;
+    // TODO implement min filter to use the NaN ranges
+  for (int i = 0; i < num_points; i++) {
+    if (std::isnan(msg.ranges[i])) {
+      ranges.push_back(msg.range_max);
+    } else {
+      ranges.push_back(msg.ranges[i]);
+    }
+  }
+#define FILTER_SIZE 5
+  std::vector<float> filtered_ranges;
+  for (int i = FILTER_SIZE/2; i < num_points - FILTER_SIZE/2-1; i++) {
+    // Pick Window
+    float min = msg.range_max;
+    for (int j = 0; j < FILTER_SIZE; j++) {
+      if (ranges[i + j - FILTER_SIZE/2] < min) {
+        min = ranges[i + j - FILTER_SIZE/2];
+      }
+    }
+    filtered_ranges.push_back(min);
+  }
+
+  for (int i = 0; i < num_points-1; i += 2) {
     line_x.clear();
     line_y.clear();
     double theta = ips_yaw + msg.angle_min + i*msg.angle_increment + YAW_OFFSET;
 
-    float range = msg.ranges[i];
+    float range = filtered_ranges[i];
     if (std::isnan(range)) {
+      ROS_INFO("NAN");
       continue;
     }
     range = (range > msg.range_max) ? msg.range_max : range;

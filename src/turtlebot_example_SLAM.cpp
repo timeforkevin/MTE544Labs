@@ -20,7 +20,7 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/LaserScan.h>
-#include <Eigen/Dense>
+#include <eigen3/Eigen/Dense>
 #include <random>
 #include <limits>
 
@@ -33,7 +33,7 @@
 
 #define EPS 0.02
 #define P_SENSE 0.8
-#define P_UNSENSE 0.4
+#define P_UNSENSE 0.45
 #define MAX_SENSE 4.5
 
 #define NUM_PARTICLES 100
@@ -89,33 +89,6 @@ void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<
 
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
-// //Callback function for the Position topic (SIMULATION)
-// void pose_callback(const gazebo_msgs::ModelStates& msg) {
-//   static std::normal_distribution<double> dist(0.0, 1);
-//   ros::Time now = ros::Time::now();
-//   if (now - last_ips > ros::Duration(2)) {
-//     int i;
-//     for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-//     double ips_x = msg.pose[i].position.x + dist(e2);
-//     double ips_y = msg.pose[i].position.y + dist(e2);
-//     double ips_yaw = tf::getYaw(msg.pose[i].orientation) + dist(e2);
-//     measurement_update(ips_x, ips_y, ips_yaw);
-//     last_ips = now;
-//   }
-// }
-
-//Callback function for the Position topic (LIVE)
-/*
-void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
-{
-
-	double ips_x X = msg.pose.pose.position.x; // Robot X psotition
-	double ips_y Y = msg.pose.pose.position.y; // Robot Y psotition
-	double ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
-  measurement_update(ips_x, ips_y, ips_yaw);
-	ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", X, Y, Yaw);
-}*/
-
 void odom_callback(nav_msgs::Odometry msg) {
   if (last_motion_model_pred.isZero()) {
     last_motion_model_pred = ros::Time::now();
@@ -167,13 +140,6 @@ void image_callback(const sensor_msgs::LaserScan msg) {
   marker_pub.publish(points);
 
   last_scan_reg_pred = now;
-}
-
-//Callback function for the map
-void map_callback(const nav_msgs::OccupancyGrid& msg)
-{
-    //This function is called when a new map is received
-    //you probably want to save the map into a form which is easy to work with
 }
 
 double nearest_neighbour_squared_brute_force(std::vector<Vector2d>& last_scan_list,
@@ -300,8 +266,8 @@ void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::
     p[0] = range * cos(theta);
     p[1] = range * sin(theta);
     new_scan_list.push_back(p);
-    if (theta < msg.angle_max / 2 &&
-        theta > msg.angle_min / 2) {
+    if (theta < msg.angle_max * 0.6 &&
+        theta > msg.angle_min * 0.6) {
       icp_scan_list.push_back(p);
     }
   }
@@ -311,17 +277,23 @@ void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::
   Rotation2D TR(0);
   if (icp_scan_list.size() && last_scan_list.size()) {
     double mmse = iterative_closest_point(icp_scan_list, TR, TT);
-    std::normal_distribution<double> dist(0.0, mmse);
+    std::normal_distribution<double> dist(0.0, 10000*sqrt(mmse)/icp_scan_list.size());
     for (int i = 0; i < NUM_PARTICLES; i++) {
       particle *p = &particle_set[i];
       Rotation2D r_yaw(p->x(2));
-      Vector2d dx = r_yaw*TT;
+      Rotation2D r_BI(-M_PI);
+      Vector2d dx = r_yaw*r_BI*TT;
+      dx = -1*dx;
+
       Vector3d Bu;
       Bu << dx, TR.smallestPositiveAngle();
-      Vector3d delta(dist(e2), dist(e2), dist(e2));
+      Vector3d delta(dist(e2), dist(e2), 10*dist(e2));
       p->x += Bu + delta;
       if (p->x(2) > M_PI) {
         p->x(2) -= 2*M_PI;
+      }
+      if (p->x(2) < -M_PI) {
+        p->x(2) += 2*M_PI;
       }
     }
   }
@@ -438,6 +410,31 @@ void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<
 
 
 void scan_registration_measurement_model(const sensor_msgs::LaserScan msg) {
+
+  float fov = msg.angle_max - msg.angle_min;
+  int num_points = abs(fov / msg.angle_increment);
+  std::vector<float> ranges;
+    // TODO implement min filter to use the NaN ranges
+  for (int i = 0; i < num_points; i++) {
+    if (std::isnan(msg.ranges[i])) {
+      ranges.push_back(msg.range_max);
+    } else {
+      ranges.push_back(msg.ranges[i]);
+    }
+  }
+#define FILTER_SIZE 5
+  std::vector<float> filtered_ranges;
+  for (int i = FILTER_SIZE/2; i < num_points - FILTER_SIZE/2-1; i++) {
+    // Pick Window
+    float min = msg.range_max;
+    for (int j = 0; j < FILTER_SIZE; j++) {
+      if (ranges[i + j - FILTER_SIZE/2] < min) {
+        min = ranges[i + j - FILTER_SIZE/2];
+      }
+    }
+    filtered_ranges.push_back(min);
+  }
+
   for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *p = &particle_set[i];
     p->weight = 0;
@@ -449,19 +446,13 @@ void scan_registration_measurement_model(const sensor_msgs::LaserScan msg) {
     int prev_endpoint_x = 0;
     int prev_endpoint_y = 0;
 
-    float fov = msg.angle_max - msg.angle_min;
-    int num_points = abs(fov / msg.angle_increment);
-    for (int j = 0; j < num_points; j += 2) {
+
+    for (int j = 0; j < filtered_ranges.size()-1; j += 2) {
       line_x.clear();
       line_y.clear();
-      double theta = p->x(2) + msg.angle_min + i*msg.angle_increment;
+      double theta = p->x(2) + msg.angle_min + j*msg.angle_increment;
+      float range = filtered_ranges[j];
 
-      // TODO implement median filter to use the NaN ranges
-      float range = msg.ranges[i];
-      if (std::isnan(range)) {
-        continue;
-      }
-      range = (range > msg.range_max) ? msg.range_max : range;
       int endpoint_x = x_map_idx + range / MAP_RESOLUTION * cos(theta);
       int endpoint_y = y_map_idx + range / MAP_RESOLUTION * sin(theta);
       // Do not draw the same line twice
@@ -511,7 +502,32 @@ void scan_registration_measurement_model(const sensor_msgs::LaserScan msg) {
 }
 
 void map_update(const sensor_msgs::LaserScan msg) {
-for (int i = 0; i < NUM_PARTICLES; i++) {
+
+  float fov = msg.angle_max - msg.angle_min;
+  int num_points = abs(fov / msg.angle_increment);
+  std::vector<float> ranges;
+    // TODO implement min filter to use the NaN ranges
+  for (int i = 0; i < num_points; i++) {
+    if (std::isnan(msg.ranges[i])) {
+      ranges.push_back(msg.range_max);
+    } else {
+      ranges.push_back(msg.ranges[i]);
+    }
+  }
+  std::vector<float> filtered_ranges;
+  for (int i = FILTER_SIZE/2; i < num_points - FILTER_SIZE/2-1; i++) {
+    // Pick Window
+    float min = msg.range_max;
+    for (int j = 0; j < FILTER_SIZE; j++) {
+      if (ranges[i + j - FILTER_SIZE/2] < min) {
+        min = ranges[i + j - FILTER_SIZE/2];
+      }
+    }
+    filtered_ranges.push_back(min);
+  }
+
+  // for (int i = 0; i < NUM_PARTICLES; i++) {
+  for (int i = 0; i < 1; i++) {
     particle *p = &particle_set[i];
     p->weight = 0;
 
@@ -522,21 +538,17 @@ for (int i = 0; i < NUM_PARTICLES; i++) {
     int prev_endpoint_x = 0;
     int prev_endpoint_y = 0;
 
-    float fov = msg.angle_max - msg.angle_min;
-    int num_points = abs(fov / msg.angle_increment);
-    for (int j = 0; j < num_points; j += 2) {
+    for (int j = 0; j < filtered_ranges.size()-1; j += 2) {
       line_x.clear();
       line_y.clear();
-      double theta = p->x(2) + msg.angle_min + i*msg.angle_increment;
+      double theta = p->x(2) + msg.angle_min + j*msg.angle_increment;
 
       // TODO implement median filter to use the NaN ranges
-      float range = msg.ranges[i];
-      if (std::isnan(range)) {
-        continue;
-      }
-      range = (range > msg.range_max) ? msg.range_max : range;
+      float range = filtered_ranges[j];
+
       int endpoint_x = x_map_idx + range / MAP_RESOLUTION * cos(theta);
       int endpoint_y = y_map_idx + range / MAP_RESOLUTION * sin(theta);
+      ROS_INFO("YAW %f X %d Y %d endX %d endY %d", p->x(2), x_map_idx, y_map_idx, endpoint_x, endpoint_y);
       // Do not draw the same line twice
       if (endpoint_x == prev_endpoint_x &&
           endpoint_y == prev_endpoint_y) {
@@ -565,10 +577,12 @@ for (int i = 0; i < NUM_PARTICLES; i++) {
 void update_occupancy_grid() {
   for (int i = 0; i < MAP_WIDTH; i++) {
     for (int j = 0; j < MAP_WIDTH; j++) {
-      if (fabs(logit_occupancy_grid[i*MAP_WIDTH + j]) < EPS) {
+      // NASTY HACK to get map to display right
+      // if (fabs(logit_occupancy_grid[i*MAP_WIDTH + j]) < EPS) {
+      if (fabs(logit_occupancy_grid[j*MAP_WIDTH + i]) < EPS) {
         occupancy_grid[i*MAP_WIDTH + j] = 50;
       } else {
-        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(logit_occupancy_grid[i*MAP_WIDTH + j]) * 100);
+        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(logit_occupancy_grid[j*MAP_WIDTH + i]) * 100);
       }
     }
   }
@@ -600,9 +614,7 @@ int main(int argc, char **argv)
   ros::NodeHandle n;
 
   //Subscribe to the desired topics and assign callbacks
-  // ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
   ros::Subscriber odom_sub = n.subscribe("/odom", 1, odom_callback);
-  ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
   ros::Subscriber kinect_sub = n.subscribe("/scan", 1, image_callback);
 
   //Setup topics to Publish from this node
