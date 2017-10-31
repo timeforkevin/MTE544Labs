@@ -29,6 +29,8 @@
 #define ICP_ITERATIONS 20
 #define FRAND_TO(X) (static_cast <double> (rand()) / (static_cast <double> (RAND_MAX/(X))))
 
+typedef Eigen::Matrix<double, 3, 1> Vector3d;
+
 std::vector<Vector2d> last_scan_list;
 kd_node *last_scan_tree;
 

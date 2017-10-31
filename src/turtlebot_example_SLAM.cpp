@@ -200,55 +200,73 @@ double calc_mmse(std::vector<Vector2d>& scan_list,
   return mmse;
 }
 
-void iterative_closest_point(std::vector<Vector2d> scan_list,
-                             Rotation2D& TR, Vector2d& TT) {
+double iterative_closest_point(std::vector<Vector2d> scan_list,
+                               Rotation2D& TR, Vector2d& TT) {
   double eps = 0.0001;
-  double gamma = 10;
   Vector2d dx(eps, 0.0);
   Vector2d dy(0.0, eps);
   Rotation2D dr(eps);
   double mmse = 0.0;
+  double next_mmse = 0.0;
   double dm_dx = 0.0;
   double dm_dy = 0.0;
   double dm_dr = 0.0;
-  bool failed = false;
+  double gamma_translate = 10;
+  double gamma_rotate = 10;
+  bool failed_translate = false;
+  bool failed_rotate = false;
   for (int i = 0; i < ICP_ITERATIONS; i++) {
-#ifdef USE_SVD
-
-#else
-    // Gradient Descent
-    if (!failed) {
-      Vector2d TTdx = TT+dx;
-      Vector2d TTdy = TT+dy;
+    // Gradient Descent Rotation
+    if (!failed_rotate) {
       Rotation2D TRdr = TR*dr;
       mmse = calc_mmse(scan_list, TR, TT);
-      dm_dx = (calc_mmse(scan_list, TR, TTdx) - mmse)/eps;
-      dm_dy = (calc_mmse(scan_list, TR, TTdy) - mmse)/eps;
       dm_dr = (calc_mmse(scan_list, TRdr, TT) - mmse)/eps;
     }
-
-    Rotation2D R(-gamma*dm_dr);
-    Vector2d T(-gamma*dm_dx, -gamma*dm_dy);
+    Rotation2D R(-gamma_rotate*dm_dr);
     R *= TR;
+
+    next_mmse = calc_mmse(scan_list, R, TT);
+    if (next_mmse < mmse) {
+      mmse = next_mmse;
+      TR = R;
+      if (!failed_rotate) {
+        gamma_rotate *= 2;
+      }
+      failed_rotate = false;
+    } else {
+      failed_rotate = true;
+      gamma_rotate /= 2;
+    }
+
+    // Gradient Descent Translation
+    if (!failed_translate) {
+      Vector2d TTdx = TT+dx;
+      Vector2d TTdy = TT+dy;
+      dm_dx = (calc_mmse(scan_list, TR, TTdx) - mmse)/eps;
+      dm_dy = (calc_mmse(scan_list, TR, TTdy) - mmse)/eps;
+    }
+
+    Vector2d T(-gamma_translate*dm_dx, -gamma_translate*dm_dy);
     T = R*TT + T;
 
-    double next_mmse = calc_mmse(scan_list, R, T);
-    // ROS_INFO("MMSE: %.4e NEXTMMSE:%.4e gamma: %f", mmse, next_mmse, gamma);
+    next_mmse = calc_mmse(scan_list, TR, T);
     if (next_mmse < mmse) {
-      TR = R;
+      mmse = next_mmse;
       TT = T;
-      if (!failed) {
-        gamma *= 2;
+      if (!failed_translate) {
+        gamma_translate *= 2;
       }
-      failed = false;
+      failed_translate = false;
     } else {
-      failed = true;
-      gamma /= 2;
+      failed_translate = true;
+      gamma_translate /= 2;
     }
-#endif
+    if (mmse < 1e-11) {
+      break;
+    }
   }
-  ROS_INFO("MMSE: %.4e X:%.4f Y:%.4f R:%.4e", mmse, TT(0), TT(1), TR.angle());
-
+  // ROS_INFO("MMSE: %.4e X:%.4f Y:%.4f R:%.4e", mmse, TT(0), TT(1), TR.angle());
+  return mmse;
 }
 
 Vector2d centroid(std::vector<Vector2d> list) {
@@ -261,7 +279,6 @@ Vector2d centroid(std::vector<Vector2d> list) {
 }
 
 void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::Duration dt) {
-  static std::normal_distribution<double> dist(0.0, 0.01);
   std::vector<Vector2d> new_scan_list;
   std::vector<Vector2d> icp_scan_list;
   float fov = msg.angle_max - msg.angle_min;
@@ -276,26 +293,29 @@ void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::
     p[0] = range * cos(theta);
     p[1] = range * sin(theta);
     new_scan_list.push_back(p);
-    if (abs(theta) < fov / 4) {
+    if (theta < msg.angle_max / 2 &&
+        theta > msg.angle_min / 2) {
       icp_scan_list.push_back(p);
     }
   }
 
   // Match centroids
-  Vector2d TT = centroid(last_scan_list) - centroid(new_scan_list);
+  Vector2d TT = Vector2d::Zero();
   Rotation2D TR(0);
   if (icp_scan_list.size() && last_scan_list.size()) {
-    iterative_closest_point(icp_scan_list, TR, TT);
+    double mmse = iterative_closest_point(icp_scan_list, TR, TT);
+    std::normal_distribution<double> dist(0.0, mmse);
     for (int i = 0; i < NUM_PARTICLES; i++) {
       particle *p = &particle_set[i];
-      Vector2d x;
-      x << p->x(0), p->x(1);
-      x = TR*x + TT;
-      x(0) += dist(e2);
-      x(1) += dist(e2);
-      p->x(0) = x(0);
-      p->x(1) = x(1);
-      p->x(2) += TR.angle();
+      Rotation2D r_yaw(p->x(2));
+      Vector2d dx = r_yaw*TT;
+      Vector3d Bu;
+      Bu << dx, TR.smallestPositiveAngle();
+      Vector3d delta(dist(e2), dist(e2), dist(e2));
+      p->x += Bu + delta;
+      if (p->x(2) > M_PI) {
+        p->x(2) -= 2*M_PI;
+      }
     }
   }
 #ifdef USE_KD_TREE
