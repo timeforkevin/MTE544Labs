@@ -2,10 +2,10 @@
 //
 // turtlebot_example.cpp
 // This file contains example code for use with ME 597 lab 2
-// It outlines the basic setup of a ros node and the various 
+// It outlines the basic setup of a ros node and the various
 // inputs and outputs needed for this lab
-// 
-// Author: James Servos 
+//
+// Author: James Servos
 // Edited: Nima Mohajerin
 //
 // //////////////////////////////////////////////////////////
@@ -18,6 +18,7 @@
 #include <visualization_msgs/Marker.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
 #include <sensor_msgs/Image.h>
 #include <eigen3/Eigen/Dense>
 #include <random>
@@ -52,6 +53,7 @@ typedef struct {
 
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
+ros::Publisher path_publisher;
 
 visualization_msgs::Marker points;
 ros::Time last_pred;
@@ -61,10 +63,15 @@ particle *particle_set;
 std::random_device rd;
 std::mt19937 e2(rd());
 
+// path plotting
+std::vector<geometry_msgs::PoseStamped> plan;
+nav_msgs::Path gui_path;
+
 
 // Function Prototypes
 void prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::Duration dt);
 void measurement_update(double ips_x, double ips_y, double ips_yaw);
+void gui_path_update();
 
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
@@ -89,11 +96,11 @@ void pose_callback(const gazebo_msgs::ModelStates& msg) {
 void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
 {
 
-	double ips_x X = msg.pose.pose.position.x; // Robot X psotition
-	double ips_y Y = msg.pose.pose.position.y; // Robot Y psotition
-	double ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
+  double ips_x X = msg.pose.pose.position.x; // Robot X psotition
+  double ips_y Y = msg.pose.pose.position.y; // Robot Y psotition
+  double ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
   measurement_update(ips_x, ips_y, ips_yaw);
-	ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", X, Y, Yaw);
+  ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", X, Y, Yaw);
 }*/
 
 void odom_callback(nav_msgs::Odometry msg) {
@@ -232,6 +239,39 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   free(particle_set);
   particle_set = new_particle_set;
   ROS_INFO("RESAMPLE w = %f", running_sum);
+  gui_path_update();
+}
+
+void gui_path_update() {
+  geometry_msgs::PoseStamped pose;
+  for (int i = 0; i < NUM_PARTICLES; i++) {
+    particle *sampled = &particle_set[i];
+    pose.pose.position.x += sampled->x(0);
+    pose.pose.position.y += sampled->x(1);
+    pose.pose.position.z = 0.0;
+    pose.pose.orientation.x = 0.0;
+    pose.pose.orientation.y = 0.0;
+    pose.pose.orientation.z = 0.0;
+    pose.pose.orientation.w = sampled->x(2);
+  }
+
+  pose.pose.position.x /= NUM_PARTICLES;
+  pose.pose.position.y /= NUM_PARTICLES;
+  pose.pose.orientation.w /= NUM_PARTICLES;
+
+  plan.push_back(pose);
+  gui_path.poses.resize(plan.size());
+
+  if(!plan.empty()) {
+    gui_path.header.frame_id = "map";
+    gui_path.header.stamp = plan[0].header.stamp;
+  }
+
+  for(unsigned int i=0; i < plan.size(); i++){
+    gui_path.poses[i] = plan[i];
+  }
+
+  path_publisher.publish(gui_path);
 }
 
 int main(int argc, char **argv)
@@ -258,7 +298,7 @@ int main(int argc, char **argv)
   points.scale.x = 0.05;
   points.scale.y = 0.05;
 
-	//Initialize the ROS framework
+  //Initialize the ROS framework
   ros::init(argc,argv,"main_control");
   ros::NodeHandle n;
 
@@ -272,6 +312,7 @@ int main(int argc, char **argv)
   ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
   pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
   marker_pub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1, true);
+  path_publisher = n.advertise<nav_msgs::Path>("/visualization_path", 1, true);
 
   //Velocity control variable
   geometry_msgs::Twist vel;
@@ -281,14 +322,14 @@ int main(int argc, char **argv)
 
   while (ros::ok())
   {
-  	loop_rate.sleep(); //Maintain the loop rate
-  	ros::spinOnce();   //Check for new messages
+    loop_rate.sleep(); //Maintain the loop rate
+    ros::spinOnce();   //Check for new messages
 
-  	//Main loop code goes here:
-  	vel.linear.x = 0; // set linear speed
-  	vel.angular.z = 0; // set angular speed
+    //Main loop code goes here:
+    vel.linear.x = 0; // set linear speed
+    vel.angular.z = 0; // set angular speed
 
-  	velocity_publisher.publish(vel); // Publish the command velocity
+    velocity_publisher.publish(vel); // Publish the command velocity
   }
 
   free(particle_set);
