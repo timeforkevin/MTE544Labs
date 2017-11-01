@@ -32,14 +32,15 @@
 #define MAP_ORIGIN_Y (-5)
 
 #define EPS 0.02
-#define P_SENSE 0.8
-#define P_UNSENSE 0.45
+#define P_SENSE 0.9
+#define P_UNSENSE 0.4
 #define MAX_SENSE 4.5
 
-#define NUM_PARTICLES 100
-#define ICP_ITERATIONS 20
+#define NUM_PARTICLES 200
+#define ICP_ITERATIONS 40
 
-#define POINT_IN_MAP(X,Y) (X > -1 && X < MAP_WIDTH && Y > -1 && Y < MAP_WIDTH)
+#define CERTAIN(X) ((X) < -20 || (X) > 20)
+#define POINT_IN_MAP(X,Y) ((X) > -1 && (X) < MAP_WIDTH && (Y) > -1 && (Y) < MAP_WIDTH)
 #define FRAND_TO(X) (static_cast <double> (rand()) / (static_cast <double> (RAND_MAX/(X))))
 #define MAX(X,Y) ((X) > (Y) ? (X) : (Y))
 
@@ -54,17 +55,17 @@ typedef Eigen::Rotation2D<double> Rotation2D;
 typedef struct {
   Vector3d x;
   double weight;
+  float *logit_occupancy_grid;
 } particle;
 
 typedef char int8;
 
-int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];
-float logit_occupancy_grid[MAP_WIDTH*MAP_WIDTH];
-
 ros::Publisher pose_publisher;
 ros::Publisher marker_pub;
+ros::Publisher grid_publisher;
 
 visualization_msgs::Marker points;
+nav_msgs::OccupancyGrid occ_grid_msg;
 ros::Time last_motion_model_pred;
 ros::Time last_scan_reg_pred;
 ros::Time last_ips;
@@ -82,9 +83,10 @@ std::vector<Vector2d> last_scan_list;
 void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::Duration dt);
 void motion_model_prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::Duration dt);
 void scan_registration_measurement_model(const sensor_msgs::LaserScan msg);
+void update_occupancy_grid(particle *p);
 void map_update(const sensor_msgs::LaserScan msg);
-float logit(float p);
-float i_logit(float l);
+double logit(double p);
+double i_logit(double l);
 void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<int>& y);
 
 short sgn(int x) { return x >= 0 ? 1 : -1; }
@@ -234,7 +236,7 @@ double iterative_closest_point(std::vector<Vector2d> scan_list,
       failed_translate = true;
       gamma_translate /= 2;
     }
-    if (mmse < 1e-11) {
+    if (mmse < 1e-10) {
       break;
     }
   }
@@ -266,8 +268,8 @@ void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::
     p[0] = range * cos(theta);
     p[1] = range * sin(theta);
     new_scan_list.push_back(p);
-    if (theta < msg.angle_max * 0.6 &&
-        theta > msg.angle_min * 0.6) {
+    if (theta < msg.angle_max * 0.75 &&
+        theta > msg.angle_min * 0.75) {
       icp_scan_list.push_back(p);
     }
   }
@@ -275,33 +277,42 @@ void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::
   // Match centroids
   Vector2d TT = Vector2d::Zero();
   Rotation2D TR(0);
+  double mmse = 0;
   if (icp_scan_list.size() && last_scan_list.size()) {
-    double mmse = iterative_closest_point(icp_scan_list, TR, TT);
-    std::normal_distribution<double> dist(0.0, 10000*sqrt(mmse)/icp_scan_list.size());
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-      particle *p = &particle_set[i];
-      Rotation2D r_yaw(p->x(2));
-      Rotation2D r_BI(-M_PI);
-      Vector2d dx = r_yaw*r_BI*TT;
-      dx = -1*dx;
+    mmse = iterative_closest_point(icp_scan_list, TR, TT);
+    ROS_INFO("sqrt MMSE %f", sqrt(mmse));
+#define ACCEPTABLE_ERROR 0.005
+    if (sqrt(mmse) < ACCEPTABLE_ERROR) {
+      std::normal_distribution<double> distt(0.0, ACCEPTABLE_ERROR);
+      std::normal_distribution<double> distr(2*ACCEPTABLE_ERROR, ACCEPTABLE_ERROR);
+      for (int i = 0; i < NUM_PARTICLES; i++) {
+        particle *p = &particle_set[i];
+        Rotation2D r_yaw(p->x(2));
+        Rotation2D r_BI(-M_PI);
+        Vector2d dx = r_yaw*r_BI*TT;
+        dx = -1*dx;
 
-      Vector3d Bu;
-      Bu << dx, TR.smallestPositiveAngle();
-      Vector3d delta(dist(e2), dist(e2), 10*dist(e2));
-      p->x += Bu + delta;
-      if (p->x(2) > M_PI) {
-        p->x(2) -= 2*M_PI;
+        Vector3d Bu;
+        Bu << dx, TR.smallestPositiveAngle();
+        Vector3d delta(distt(e2), distt(e2), distr(e2));
+        p->x += Bu + delta;
+        if (p->x(2) > M_PI) {
+          p->x(2) -= 2*M_PI;
+        }
+        if (p->x(2) < -M_PI) {
+          p->x(2) += 2*M_PI;
+        }
       }
-      if (p->x(2) < -M_PI) {
-        p->x(2) += 2*M_PI;
-      }
+
     }
   }
+  if (mmse < ACCEPTABLE_ERROR) {
 #ifdef USE_KD_TREE
-  destroy_kd_tree(last_scan_tree);
-  last_scan_tree = create_2d_tree(new_scan_list, 0);
+    destroy_kd_tree(last_scan_tree);
+    last_scan_tree = create_2d_tree(new_scan_list, 0);
 #endif
-  last_scan_list = new_scan_list;
+    last_scan_list = new_scan_list;
+  }
 }
 
 /// Update with Motion Model
@@ -359,12 +370,12 @@ int map_to_cdf(double sample, double *cdf, int cdf_size) {
   return i_begin;
 }
 
-float i_logit(float l) {
-    float exp_l = exp(l);
+double i_logit(double l) {
+    double exp_l = exp(l);
     return exp_l/(1+exp_l);
 }
 
-float logit(float p) {
+double logit(double p) {
     return log(p/(1-p));
 }
 
@@ -468,13 +479,15 @@ void scan_registration_measurement_model(const sensor_msgs::LaserScan msg) {
         line_y.pop_back();
         // Do not evaluate points off map
         if (POINT_IN_MAP(next_x, next_y)) {
-          p->weight -= logit_occupancy_grid[next_x*MAP_WIDTH + next_y];
+          p->weight -= p->logit_occupancy_grid[next_x*MAP_WIDTH + next_y];
         }
       }
       if (range < MAX_SENSE && POINT_IN_MAP(endpoint_x, endpoint_y)) {
-        p->weight += logit_occupancy_grid[endpoint_x*MAP_WIDTH + endpoint_y];
+        if (POINT_IN_MAP(endpoint_x, endpoint_y)) {
+          p->weight += 20*p->logit_occupancy_grid[(endpoint_x)*MAP_WIDTH + (endpoint_y)];
+        }
+
       }
-      p->weight = i_logit(p->weight);
       prev_endpoint_x = endpoint_x;
       prev_endpoint_y = endpoint_y;
     }
@@ -487,18 +500,32 @@ void scan_registration_measurement_model(const sensor_msgs::LaserScan msg) {
     particle *p = &particle_set[i];
     cdf[i] = running_sum += p->weight;
   }
-
   // Resample
-  particle *new_particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
-  for (int i = 0; i < NUM_PARTICLES; i++) {
-    int sample_index = map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES);
-    particle *sampled = &particle_set[sample_index];
-    // ROS_INFO("i:%d w:%f", sample_index, sampled->weight, sampled->x(0));
-    memcpy(&new_particle_set[i], sampled, sizeof(particle));
-  }
-  free(particle_set);
-  particle_set = new_particle_set;
-  // ROS_INFO("RESAMPLE w = %f", running_sum);
+      
+  // if (running_sum < 10000) {
+    ROS_INFO("RESAMPLE CDF SUM %f", running_sum);
+    particle *new_particle_set = (particle*)malloc(sizeof(particle) * NUM_PARTICLES);
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+      int sample_index = map_to_cdf(FRAND_TO(running_sum), cdf, NUM_PARTICLES);
+      particle *sampled = &particle_set[sample_index];
+      new_particle_set[i].logit_occupancy_grid = (float*) malloc(sizeof(float) * MAP_WIDTH * MAP_WIDTH);
+      memcpy(new_particle_set[i].logit_occupancy_grid,
+                        sampled->logit_occupancy_grid,
+                        sizeof(float) * MAP_WIDTH * MAP_WIDTH);
+
+      new_particle_set[i].x = sampled->x;
+      new_particle_set[i].weight = sampled->weight;
+    }
+
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+      particle *p = &particle_set[i];
+      free(p->logit_occupancy_grid);
+    }
+
+    free(particle_set);
+    particle_set = new_particle_set;
+  // }
+  update_occupancy_grid(&particle_set[0]);
 }
 
 void map_update(const sensor_msgs::LaserScan msg) {
@@ -526,10 +553,11 @@ void map_update(const sensor_msgs::LaserScan msg) {
     filtered_ranges.push_back(min);
   }
 
-  // for (int i = 0; i < NUM_PARTICLES; i++) {
-  for (int i = 0; i < 1; i++) {
+  for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *p = &particle_set[i];
-    p->weight = 0;
+    // ROS_INFO("p_weight: %f", p->weight);
+    double update_factor = p->weight / 900000;
+    // No map update if unsure
 
     int x_map_idx = round((p->x(0) - MAP_ORIGIN_X)/MAP_RESOLUTION);
     int y_map_idx = round((p->x(1) - MAP_ORIGIN_Y)/MAP_RESOLUTION);
@@ -548,13 +576,18 @@ void map_update(const sensor_msgs::LaserScan msg) {
 
       int endpoint_x = x_map_idx + range / MAP_RESOLUTION * cos(theta);
       int endpoint_y = y_map_idx + range / MAP_RESOLUTION * sin(theta);
-      ROS_INFO("YAW %f X %d Y %d endX %d endY %d", p->x(2), x_map_idx, y_map_idx, endpoint_x, endpoint_y);
       // Do not draw the same line twice
       if (endpoint_x == prev_endpoint_x &&
           endpoint_y == prev_endpoint_y) {
         continue;
       }
       bresenham(x_map_idx, y_map_idx, endpoint_x, endpoint_y, line_x, line_y);
+
+      // Ignore last three points near feature
+      for (int k = 0; k < 3; k++) {
+        line_x.pop_back();
+        line_y.pop_back();
+      }
       while(!line_x.empty()) {
         int next_x = line_x.back();
         int next_y = line_y.back();
@@ -562,11 +595,21 @@ void map_update(const sensor_msgs::LaserScan msg) {
         line_y.pop_back();
         // Do not evaluate points off map
         if (POINT_IN_MAP(next_x, next_y)) {
-          logit_occupancy_grid[next_x*MAP_WIDTH + next_y] += logit(P_UNSENSE);
+          if (!CERTAIN(p->logit_occupancy_grid[next_x*MAP_WIDTH + next_y])) {
+            p->logit_occupancy_grid[next_x*MAP_WIDTH + next_y] += logit(P_UNSENSE);
+          }
         }
       }
-      if (range < MAX_SENSE && POINT_IN_MAP(endpoint_x, endpoint_y)) {
-        logit_occupancy_grid[endpoint_x*MAP_WIDTH + endpoint_y] += logit(P_SENSE);
+      if (range < MAX_SENSE) {
+        for (int k = -1; k < 1; k++) {
+          for (int l = -1; l < 1; l++) {
+            if (POINT_IN_MAP(endpoint_x + k, endpoint_y + l)) {
+              if (!CERTAIN(p->logit_occupancy_grid[(endpoint_x + k)*MAP_WIDTH + (endpoint_y + l)])) {
+                p->logit_occupancy_grid[(endpoint_x + k)*MAP_WIDTH + (endpoint_y + l)] += logit(P_SENSE);
+              }
+            }
+          }
+        }
       }
       prev_endpoint_x = endpoint_x;
       prev_endpoint_y = endpoint_y;
@@ -574,18 +617,22 @@ void map_update(const sensor_msgs::LaserScan msg) {
   }
 }
 
-void update_occupancy_grid() {
+void update_occupancy_grid(particle *p) {
+  int8 occupancy_grid[MAP_WIDTH*MAP_WIDTH];
   for (int i = 0; i < MAP_WIDTH; i++) {
     for (int j = 0; j < MAP_WIDTH; j++) {
       // NASTY HACK to get map to display right
       // if (fabs(logit_occupancy_grid[i*MAP_WIDTH + j]) < EPS) {
-      if (fabs(logit_occupancy_grid[j*MAP_WIDTH + i]) < EPS) {
+      if (fabs(p->logit_occupancy_grid[j*MAP_WIDTH + i]) < EPS) {
         occupancy_grid[i*MAP_WIDTH + j] = 50;
       } else {
-        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(logit_occupancy_grid[j*MAP_WIDTH + i]) * 100);
+        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(p->logit_occupancy_grid[j*MAP_WIDTH + i]) * 100);
       }
     }
   }
+  occ_grid_msg.data = std::vector<signed char>(occupancy_grid, occupancy_grid+MAP_WIDTH*MAP_WIDTH);
+
+  grid_publisher.publish(occ_grid_msg);
 }
 
 int main(int argc, char **argv)
@@ -594,6 +641,7 @@ int main(int argc, char **argv)
   for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *p = &particle_set[i];
     p->x << 0, 0, 0;
+    p->logit_occupancy_grid = (float*) malloc(sizeof(float) * MAP_WIDTH * MAP_WIDTH);
   }
 
   points.header.frame_id = "map";
@@ -621,13 +669,11 @@ int main(int argc, char **argv)
   ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
   pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
   marker_pub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1, true);
-  ros::Publisher grid_publisher = n.advertise<nav_msgs::OccupancyGrid>("/map", 2);
+  grid_publisher = n.advertise<nav_msgs::OccupancyGrid>("/map", 2);
 
   //Velocity control variable
   geometry_msgs::Twist vel;
 
-
-  nav_msgs::OccupancyGrid occ_grid_msg;
   
   occ_grid_msg.info.resolution = MAP_RESOLUTION;
   occ_grid_msg.info.width = MAP_WIDTH;
@@ -637,7 +683,7 @@ int main(int argc, char **argv)
 
   //Set the loop rate
   ros::Rate loop_rate(20);    //20Hz update rate
-
+ROS_INFO("start");
   while (ros::ok())
   {
   	loop_rate.sleep(); //Maintain the loop rate
@@ -645,15 +691,15 @@ int main(int argc, char **argv)
 
   	//Main loop code goes here:
   	vel.linear.x = 0; // set linear speed
-  	vel.angular.z = 0; // set angular speed
+  	vel.angular.z = 0.10; // set angular speed
 
   	velocity_publisher.publish(vel); // Publish the command velocity
-    update_occupancy_grid();
-    occ_grid_msg.data = std::vector<signed char>(occupancy_grid, occupancy_grid+MAP_WIDTH*MAP_WIDTH);
-
-    grid_publisher.publish(occ_grid_msg);
   }
 
+  for (int i = 0; i < NUM_PARTICLES; i++) {
+    particle *p = &particle_set[i];
+    free(p->logit_occupancy_grid);
+  }
   free(particle_set);
   return 0;
 }
