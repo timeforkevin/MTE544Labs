@@ -3,7 +3,7 @@
 
 #include <random>
 #include <limits>
-#include <Eigen/Dense>
+#include <eigen3/Eigen/Dense>
 
 typedef Eigen::Matrix<double, 2, 1> Vector2d;
 

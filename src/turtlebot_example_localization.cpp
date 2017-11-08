@@ -22,6 +22,7 @@
 #include <sensor_msgs/Image.h>
 #include <eigen3/Eigen/Dense>
 #include <random>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 
 #define YAW_OFFSET 0
 #define IMAGE_WIDTH 640
@@ -76,32 +77,31 @@ void gui_path_update();
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
 //Callback function for the Position topic (SIMULATION)
-void pose_callback(const gazebo_msgs::ModelStates& msg) {
-  static std::normal_distribution<double> dist(0.0, 1);
-  ros::Time now = ros::Time::now();
-  if (now - last_ips > ros::Duration(0.25)) {
-    int i;
-    for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-    double ips_x = msg.pose[i].position.x + dist(e2);
-    double ips_y = msg.pose[i].position.y + dist(e2);
-    double ips_yaw = tf::getYaw(msg.pose[i].orientation) + dist(e2);
-    measurement_update(ips_x, ips_y, ips_yaw);
-    // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
-    last_ips = now;
-  }
-}
+// void pose_callback(const gazebo_msgs::ModelStates& msg) {
+//   static std::normal_distribution<double> dist(0.0, 1);
+//   ros::Time now = ros::Time::now();
+//   if (now - last_ips > ros::Duration(0.25)) {
+//     int i;
+//     for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
+//     double ips_x = msg.pose[i].position.x + dist(e2);
+//     double ips_y = msg.pose[i].position.y + dist(e2);
+//     double ips_yaw = tf::getYaw(msg.pose[i].orientation) + dist(e2);
+//     measurement_update(ips_x, ips_y, ips_yaw);
+//     // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
+//     last_ips = now;
+//   }
+// }
 
 //Callback function for the Position topic (LIVE)
-/*
-void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
+
+void pose_callback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg)
 {
 
-  double ips_x X = msg.pose.pose.position.x; // Robot X psotition
-  double ips_y Y = msg.pose.pose.position.y; // Robot Y psotition
-  double ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
+  double ips_x = msg->pose.pose.position.x; // Robot X psotition
+  double ips_y = msg->pose.pose.position.y; // Robot Y psotition
+  double ips_yaw = tf::getYaw(msg->pose.pose.orientation); // Robot Yaw
   measurement_update(ips_x, ips_y, ips_yaw);
-  ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", X, Y, Yaw);
-}*/
+}
 
 void odom_callback(nav_msgs::Odometry msg) {
   if (last_pred.isZero()) {
@@ -202,7 +202,7 @@ void prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::
 void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   static double varx = 1;
   static double vary = 1;
-  static double varyaw = 2;
+  static double varyaw = 1;
 
   // Set Weights
   for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -217,7 +217,7 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
     }
 
     p->weight = exp(-(diffx*diffx/varx +
-                      diffy*diffy/vary)/2);
+                      diffy*diffy/vary + diffyaw*diffyaw/varyaw)/2);
   }
 
   // Calculate CDF of particles
@@ -303,7 +303,7 @@ int main(int argc, char **argv)
   ros::NodeHandle n;
 
   //Subscribe to the desired topics and assign callbacks
-  ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
+  ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
   ros::Subscriber odom_sub = n.subscribe("/odom", 1, odom_callback);
   ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
   ros::Subscriber kinect_sub = n.subscribe("/camera/depth/image_raw", 1, image_callback);

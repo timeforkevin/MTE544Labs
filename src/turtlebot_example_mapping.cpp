@@ -59,27 +59,27 @@ void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<
 short sgn(int x) { return x >= 0 ? 1 : -1; }
 
 //Callback function for the Position topic (SIMULATION)
-void pose_callback(const gazebo_msgs::ModelStates& msg) {
+// void pose_callback(const gazebo_msgs::ModelStates& msg) {
 
-  int i;
-  for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
-  ips_x = msg.pose[i].position.x ;
-  ips_y = msg.pose[i].position.y ;
-  // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
-  ips_yaw = tf::getYaw(msg.pose[i].orientation);
-  pose_updated = true;
-}
-
-//Callback function for the Position topic (LIVE)
-// void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
-// {
-
-//   ips_x = msg.pose.pose.position.x; // Robot X psotition
-//   ips_y = msg.pose.pose.position.y; // Robot Y psotition
-//   ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
-//   ROS_INFO("pose_callback X: %f Y: %f Yaw: %f", ips_x, ips_y, ips_yaw);
+//   int i;
+//   for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
+//   ips_x = msg.pose[i].position.x ;
+//   ips_y = msg.pose[i].position.y ;
+//   // ROS_INFO("POSE X: %f Y:%f", ips_x, ips_y);
+//   ips_yaw = tf::getYaw(msg.pose[i].orientation);
 //   pose_updated = true;
 // }
+
+//Callback function for the Position topic (LIVE)
+void pose_callback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg)
+{
+
+  ips_x = msg->pose.pose.position.x; // Robot X psotition
+  ips_y = msg->pose.pose.position.y; // Robot Y psotition
+  ips_yaw = tf::getYaw(msg->pose.pose.orientation); // Robot Yaw
+  ROS_INFO("pose_callback X: %f Y: %f Yaw: %f", ips_x, ips_y, ips_yaw);
+  pose_updated = true;
+}
 
 
 void update_map(const sensor_msgs::LaserScan msg) {
@@ -225,7 +225,7 @@ void update_occupancy_grid() {
       if (fabs(logit_occupancy_grid[i*MAP_WIDTH + j]) < EPS) {
         occupancy_grid[i*MAP_WIDTH + j] = 50;
       } else {
-        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(logit_occupancy_grid[i*MAP_WIDTH + j]) * 100);
+        occupancy_grid[i*MAP_WIDTH + j] = round(i_logit(logit_occupancy_grid[j*MAP_WIDTH + i]) * 100);
       }
     }
   }
@@ -239,7 +239,7 @@ int main(int argc, char **argv)
 
   //Subscribe to the desired topics and assign callbacks
   // ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
-  ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
+  ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
   ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
   ros::Subscriber kinect_sub = n.subscribe("/scan", 1, image_callback);
 

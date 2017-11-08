@@ -18,7 +18,11 @@ find_package( PkgConfig )
 pkg_check_modules( EIGEN3 REQUIRED eigen3 )
 include_directories( ${EIGEN3_INCLUDE_DIRS} )
 
-## System dependencies are found with CMake's conventions
+
+#find_package(Eigen3 REQUIRED)
+
+
+## System dependencies are found with CMake's conventionsx
 # find_package(Boost REQUIRED COMPONENTS system)
 
 
@@ -115,7 +119,7 @@ include_directories(
  add_executable(turtlebot_example_mapping src/turtlebot_example_mapping.cpp)
  add_executable(turtlebot_example_localization src/turtlebot_example_localization.cpp)
  add_executable(turtlebot_example_SLAM src/turtlebot_example_SLAM.cpp)
- add_executable(turtlebot_example_test src/turtlebot_example_test.cpp)
+ #add_executable(turtlebot_example_test src/turtlebot_example_test.cpp)
 
 ## Add cmake target dependencies of the executable/library
 ## as an example, message headers may need to be generated before nodes
@@ -138,9 +142,9 @@ include_directories(
    ${catkin_LIBRARIES}
  )
 
- target_link_libraries(turtlebot_example_test
-   ${catkin_LIBRARIES}
- )
+ # target_link_libraries(turtlebot_example_test
+ #   ${catkin_LIBRARIES}
+ # )
 #############
 ## Install ##
 #############
