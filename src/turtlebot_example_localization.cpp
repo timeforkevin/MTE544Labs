@@ -66,7 +66,7 @@ std::mt19937 e2(rd());
 // path plotting
 std::vector<geometry_msgs::PoseStamped> plan;
 nav_msgs::Path gui_path;
-
+int seq = 0;
 
 // Function Prototypes
 void prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::Duration dt);
@@ -202,7 +202,7 @@ void prediction_update(geometry_msgs::Twist odom_input, Matrix3d odom_cov, ros::
 void measurement_update(double ips_x, double ips_y, double ips_yaw) {
   static double varx = 1;
   static double vary = 1;
-  static double varyaw = 2;
+  static double varyaw = 1;
 
   // Set Weights
   for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -217,7 +217,8 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
     }
 
     p->weight = exp(-(diffx*diffx/varx +
-                      diffy*diffy/vary)/2);
+                      diffy*diffy/vary +
+                      diffyaw*diffyaw/varyaw)/2);
   }
 
   // Calculate CDF of particles
@@ -244,20 +245,19 @@ void measurement_update(double ips_x, double ips_y, double ips_yaw) {
 
 void gui_path_update() {
   geometry_msgs::PoseStamped pose;
+  float avgYaw = 0;
   for (int i = 0; i < NUM_PARTICLES; i++) {
     particle *sampled = &particle_set[i];
     pose.pose.position.x += sampled->x(0);
     pose.pose.position.y += sampled->x(1);
     pose.pose.position.z = 0.0;
-    pose.pose.orientation.x = 0.0;
-    pose.pose.orientation.y = 0.0;
-    pose.pose.orientation.z = 0.0;
-    pose.pose.orientation.w = sampled->x(2);
+    avgYaw += sampled->x(2);
   }
 
   pose.pose.position.x /= NUM_PARTICLES;
   pose.pose.position.y /= NUM_PARTICLES;
-  pose.pose.orientation.w /= NUM_PARTICLES;
+  avgYaw /= NUM_PARTICLES;
+  pose.pose.orientation = tf::createQuaternionMsgFromYaw(avgYaw);
 
   plan.push_back(pose);
   gui_path.poses.resize(plan.size());
@@ -270,8 +270,14 @@ void gui_path_update() {
   for(unsigned int i=0; i < plan.size(); i++){
     gui_path.poses[i] = plan[i];
   }
+  pose.header.seq = seq++;
+  pose.header.stamp = ros::Time::now();
+  pose.header.frame_id = "map";
+
+
 
   path_publisher.publish(gui_path);
+  pose_publisher.publish(pose);
 }
 
 int main(int argc, char **argv)
@@ -324,12 +330,6 @@ int main(int argc, char **argv)
   {
     loop_rate.sleep(); //Maintain the loop rate
     ros::spinOnce();   //Check for new messages
-
-    //Main loop code goes here:
-    vel.linear.x = 0; // set linear speed
-    vel.angular.z = 0; // set angular speed
-
-    velocity_publisher.publish(vel); // Publish the command velocity
   }
 
   free(particle_set);

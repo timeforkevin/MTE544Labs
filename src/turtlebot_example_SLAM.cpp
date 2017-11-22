@@ -294,7 +294,12 @@ void scan_registration_prediction_update(const sensor_msgs::LaserScan msg, ros::
 
         Vector3d Bu;
         Bu << dx, TR.smallestPositiveAngle();
-        Vector3d delta(distt(e2), distt(e2), distr(e2));
+        Vector3d delta;
+        if (TR.smallestAngle() > 0) {
+          delta << distt(e2), distt(e2), distr(e2);
+        } else {
+          delta << distt(e2), distt(e2), -distr(e2);
+        }
         p->x += Bu + delta;
         if (p->x(2) > M_PI) {
           p->x(2) -= 2*M_PI;
