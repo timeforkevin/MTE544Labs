@@ -92,16 +92,14 @@ void pose_callback(const gazebo_msgs::ModelStates& msg) {
 }
 
 //Callback function for the Position topic (LIVE)
-/*
-void pose_callback(const geometry_msgs::PoseWithCovarianceStamped& msg)
-{
+// void pose_callback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg)
+// {
 
-  double ips_x X = msg.pose.pose.position.x; // Robot X psotition
-  double ips_y Y = msg.pose.pose.position.y; // Robot Y psotition
-  double ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
-  measurement_update(ips_x, ips_y, ips_yaw);
-  ROS_DEBUG("pose_callback X: %f Y: %f Yaw: %f", X, Y, Yaw);
-}*/
+//   double ips_x = msg->pose.pose.position.x; // Robot X psotition
+//   double ips_y = msg->pose.pose.position.y; // Robot Y psotition
+//   double ips_yaw = tf::getYaw(msg->pose.pose.orientation); // Robot Yaw
+//   measurement_update(ips_x, ips_y, ips_yaw);
+// }
 
 void odom_callback(nav_msgs::Odometry msg) {
   if (last_pred.isZero()) {
@@ -310,6 +308,7 @@ int main(int argc, char **argv)
 
   //Subscribe to the desired topics and assign callbacks
   ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
+  // ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
   ros::Subscriber odom_sub = n.subscribe("/odom", 1, odom_callback);
   ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
   ros::Subscriber kinect_sub = n.subscribe("/camera/depth/image_raw", 1, image_callback);
